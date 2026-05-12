@@ -768,6 +768,7 @@ dependencies = [
  "lectito-fixtures",
  "owo-colors",
  "reqwest",
+ "scraper",
  "serde_json",
 ]
 
