@@ -7,6 +7,7 @@ mod metadata;
 mod patterns;
 mod readable;
 mod scoring;
+mod serialize;
 
 pub use config::{Article, ReadabilityOptions, ReadableOptions};
 pub use error::Error;
@@ -101,6 +102,68 @@ mod tests {
         assert!(article.content.contains("readability-page-1"));
         assert!(article.text_content.contains("long enough paragraph"));
         assert!(article.length > 25);
+    }
+
+    #[test]
+    fn extract_reports_invalid_base_url_and_element_limit() {
+        let invalid_url = extract(
+            "<html><body><p>text</p></body></html>",
+            Some("not a url"),
+            &Default::default(),
+        );
+        assert!(matches!(invalid_url, Err(Error::InvalidBaseUrl(_))));
+
+        let too_many_elements = extract(
+            "<html><body><main><p>text</p></main></body></html>",
+            None,
+            &ReadabilityOptions { max_elems_to_parse: Some(2), ..Default::default() },
+        );
+        assert!(matches!(too_many_elements, Err(Error::MaxElemsExceeded { .. })));
+    }
+
+    #[test]
+    fn extract_honors_base_element_for_relative_urls() {
+        let fixture = lectito_fixtures::load_fixture("base-url-base-element").unwrap();
+        let article = extract(
+            &fixture.source,
+            Some("http://fakehost/test/page.html"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(article.content.contains(r#"href="http://fakehost/foo/bar/baz.html""#));
+        assert!(article.content.contains(r#"src="http://fakehost/foo/bar/baz.png""#));
+        assert!(
+            !article
+                .content
+                .contains(r#"href="http://fakehost/test/foo/bar/baz.html""#)
+        );
+    }
+
+    #[test]
+    fn extract_repairs_noscript_images_and_scores_br_divs() {
+        let noscript_article = extract(
+            r#"<html><body><article><p>Enough text, with punctuation, to choose the article body for this regression.</p><noscript>&lt;img src="/image.jpg" alt="fallback"&gt;</noscript></article></body></html>"#,
+            Some("https://example.com/story"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            noscript_article
+                .content
+                .contains(r#"src="https://example.com/image.jpg""#)
+        );
+
+        let br_article = extract(
+            "<html><body><div>First long line with enough words to score well.<br><br>Second long line, also with enough words and punctuation to survive extraction.</div></body></html>",
+            None,
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(br_article.text_content.contains("Second long line"));
     }
 
     #[test]

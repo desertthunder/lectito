@@ -8,7 +8,7 @@ use url::Url;
 use super::config::{Article, ExtractFlags, ReadabilityOptions};
 use super::error::Error;
 use super::patterns::{MAYBE_CANDIDATE, UNLIKELY_CANDIDATES};
-use super::{cleanup, dom, metadata, patterns, scoring};
+use super::{cleanup, dom, metadata, patterns, scoring, serialize};
 use super::{metadata::Metadata, scoring::Candidate};
 
 pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions) -> Result<Option<Article>, Error> {
@@ -18,6 +18,7 @@ pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions)
 
     let document = Html::parse_document(html);
     enforce_element_limit(&document, options.max_elems_to_parse)?;
+    let base_url = effective_base_url(&document, base_url.as_ref());
 
     let metadata = metadata::extract_metadata(&document, html, options);
     let mut best_attempt: Option<ExtractAttempt> = None;
@@ -87,6 +88,7 @@ impl ExtractAttempt {
 }
 
 fn prep_document(document: &NodeRef, flags: ExtractFlags) {
+    unwrap_noscript_images(document);
     dom::remove_matching(document, "script, style");
 
     if flags.strip_unlikely {
@@ -119,6 +121,50 @@ fn prep_document(document: &NodeRef, flags: ExtractFlags) {
             }
         }
     }
+}
+
+fn effective_base_url(document: &Html, base_url: Option<&Url>) -> Option<Url> {
+    let base_url = base_url.cloned()?;
+    let selector = patterns::selector("base[href]");
+    document
+        .select(&selector)
+        .next()
+        .and_then(|base| base.value().attr("href"))
+        .and_then(|href| base_url.join(href).ok())
+        .or(Some(base_url))
+}
+
+fn unwrap_noscript_images(document: &NodeRef) {
+    for noscript in dom::select_nodes(document, "noscript") {
+        let content = unescape_basic_html(&noscript.text_contents());
+        let lower_content = content.to_ascii_lowercase();
+        if !lower_content.contains("<img") && !lower_content.contains("<picture") {
+            continue;
+        }
+
+        let fragment = kuchiki::parse_html().one(format!("<html><body>{content}</body></html>"));
+        let Some(body) = dom::select_nodes(&fragment, "body").into_iter().next() else {
+            continue;
+        };
+        let children: Vec<_> = body.children().collect();
+        if children.is_empty() {
+            continue;
+        }
+
+        for child in children {
+            noscript.insert_before(child);
+        }
+        noscript.detach();
+    }
+}
+
+fn unescape_basic_html(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&amp;", "&")
 }
 
 fn grab_article(
@@ -191,14 +237,11 @@ fn grab_article(
     cleanup::cleanup_article(&included, options, flags, base_url);
 
     let mut content = String::from(r#"<div id="readability-page-1" class="page">"#);
-    let mut text_content = String::new();
     for node in &included {
-        content.push_str(&dom::serialize_node(node)?);
-        text_content.push_str(&node.text_contents());
-        text_content.push('\n');
+        content.push_str(&serialize::serialize_node(node)?);
     }
     content.push_str("</div>");
-    text_content = patterns::normalize_spaces(text_content.trim());
+    let text_content = serialize::text_content(&included);
     let text_len = text_content.encode_utf16().count();
 
     Ok(Some(ExtractAttempt {

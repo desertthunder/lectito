@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use kuchiki::NodeRef;
 
 use super::config::ExtractFlags;
@@ -11,7 +13,15 @@ pub(crate) struct Candidate {
 
 pub(crate) fn score_candidates(document: &NodeRef, flags: ExtractFlags) -> Vec<Candidate> {
     let selector = TAGS_TO_SCORE.join(",");
-    let nodes = dom::select_nodes(document, &selector);
+    let mut nodes = dom::select_nodes(document, &selector);
+    let mut seen: HashSet<_> = nodes.iter().map(dom::node_id).collect();
+    for br in dom::select_nodes(document, "div > br") {
+        if let Some(parent) = br.parent() {
+            if seen.insert(dom::node_id(&parent)) {
+                nodes.push(parent);
+            }
+        }
+    }
     let mut candidates = Vec::<Candidate>::new();
 
     for node in nodes {

@@ -3,6 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use regex::Regex;
+use scraper::{Html, Selector};
+
 pub struct Fixture {
     pub name: String,
     pub source: String,
@@ -11,17 +14,24 @@ pub struct Fixture {
 }
 
 pub fn upstream_root() -> PathBuf {
+    samples_root()
+}
+
+pub fn samples_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/test-pages")
 }
 
 pub fn load_fixture(name: &str) -> io::Result<Fixture> {
-    let dir = upstream_root().join(name);
-    load_fixture_dir(&dir)
+    load_fixture_path(samples_root().join(name))
+}
+
+pub fn load_fixture_path(path: impl AsRef<Path>) -> io::Result<Fixture> {
+    load_fixture_dir(path.as_ref())
 }
 
 pub fn load_all() -> io::Result<Vec<Fixture>> {
     let mut fixtures = Vec::new();
-    for entry in fs::read_dir(upstream_root())? {
+    for entry in fs::read_dir(samples_root())? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             fixtures.push(load_fixture_dir(&entry.path())?);
@@ -42,6 +52,25 @@ fn load_fixture_dir(dir: &Path) -> io::Result<Fixture> {
     let expected_metadata = serde_json::from_str(&metadata).map_err(io::Error::other)?;
 
     Ok(Fixture { name, source, expected_content, expected_metadata })
+}
+
+pub fn normalized_text(html: &str) -> String {
+    let document = Html::parse_fragment(html);
+    normalize_space(&document.root_element().text().collect::<String>())
+}
+
+pub fn tag_sequence(html: &str) -> Vec<String> {
+    let document = Html::parse_fragment(html);
+    let selector = Selector::parse("*").expect("universal selector should parse");
+    document
+        .select(&selector)
+        .map(|element| element.value().name().to_string())
+        .collect()
+}
+
+pub fn normalize_space(text: &str) -> String {
+    let whitespace = Regex::new(r"\s+").expect("valid whitespace regex");
+    whitespace.replace_all(text.trim(), " ").into_owned()
 }
 
 #[cfg(test)]

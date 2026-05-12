@@ -1,8 +1,7 @@
-use std::{collections::HashMap, io};
+use std::collections::HashMap;
 
 use kuchiki::NodeRef;
 
-use super::error::Error;
 use super::patterns;
 
 pub(crate) fn inner_text(node: &NodeRef) -> String {
@@ -102,13 +101,6 @@ pub(crate) fn remove_attr(node: &NodeRef, name: &str) {
     if let Some(element) = node.as_element() {
         element.attributes.borrow_mut().remove(name);
     }
-}
-
-pub(crate) fn serialize_node(node: &NodeRef) -> Result<String, Error> {
-    let mut bytes = Vec::new();
-    node.serialize(&mut bytes)
-        .map_err(|_: io::Error| Error::Serialization)?;
-    String::from_utf8(bytes).map_err(|_| Error::Serialization)
 }
 
 pub(crate) fn node_id(node: &NodeRef) -> usize {

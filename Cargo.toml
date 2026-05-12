@@ -4,3 +4,4 @@ members = ["crates/cli", "crates/core", "crates/fixtures"]
 
 [workspace.dependencies]
 thiserror = "2.0.18"
+regex = "1.10"
