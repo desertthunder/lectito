@@ -34,7 +34,8 @@ pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions)
         let dom = kuchiki::parse_html().one(html);
         prep_document(&dom, flags);
 
-        let Some(mut attempt) = grab_article(&dom, options, flags, base_url.as_ref())? else {
+        let Some(mut attempt) = grab_article(&dom, options, flags, base_url.as_ref(), metadata.title.as_deref())?
+        else {
             continue;
         };
 
@@ -90,6 +91,7 @@ impl ExtractAttempt {
 fn prep_document(document: &NodeRef, flags: ExtractFlags) {
     unwrap_noscript_images(document);
     dom::remove_matching(document, "script, style");
+    normalize_markup(document);
 
     if flags.strip_unlikely {
         let nodes = dom::select_nodes(document, "*");
@@ -121,6 +123,46 @@ fn prep_document(document: &NodeRef, flags: ExtractFlags) {
             }
         }
     }
+}
+
+fn normalize_markup(document: &NodeRef) {
+    for font in dom::select_nodes(document, "font") {
+        let _ = dom::retag_node(&font, "span");
+    }
+
+    for div in dom::select_nodes(document, "div") {
+        if has_single_element_child(&div, "p") && direct_text_is_empty(&div) {
+            dom::replace_with_children(&div);
+        }
+    }
+
+    for div in dom::select_nodes(document, "div") {
+        if !has_child_block_element(&div) && !dom::inner_text(&div).is_empty() {
+            let _ = dom::retag_node(&div, "p");
+        }
+    }
+}
+
+fn has_single_element_child(node: &NodeRef, tag: &str) -> bool {
+    let mut element_children = node.children().filter(|child| child.as_element().is_some());
+    let Some(first) = element_children.next() else {
+        return false;
+    };
+    element_children.next().is_none() && dom::node_name(&first) == tag
+}
+
+fn direct_text_is_empty(node: &NodeRef) -> bool {
+    node.children()
+        .filter_map(|child| child.as_text().map(|text| text.borrow().to_string()))
+        .all(|text| text.trim().is_empty())
+}
+
+fn has_child_block_element(node: &NodeRef) -> bool {
+    !dom::select_nodes(
+        node,
+        "address, article, aside, blockquote, canvas, dd, div, dl, dt, fieldset, figcaption, figure, footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr, li, main, nav, noscript, ol, output, p, pre, section, table, tfoot, ul, video",
+    )
+    .is_empty()
 }
 
 fn effective_base_url(document: &Html, base_url: Option<&Url>) -> Option<Url> {
@@ -169,6 +211,7 @@ fn unescape_basic_html(value: &str) -> String {
 
 fn grab_article(
     document: &NodeRef, options: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>,
+    article_title: Option<&str>,
 ) -> Result<Option<ExtractAttempt>, Error> {
     let mut candidates = scoring::score_candidates(document, flags);
     if candidates.is_empty() {
@@ -234,11 +277,15 @@ fn grab_article(
         included.push(top_candidate);
     }
 
-    cleanup::cleanup_article(&included, options, flags, base_url);
+    cleanup::cleanup_article(&included, options, flags, base_url, article_title);
 
     let mut content = String::from(r#"<div id="readability-page-1" class="page">"#);
     for node in &included {
-        content.push_str(&serialize::serialize_node(node)?);
+        if dom::node_name(node) == "body" {
+            content.push_str(&serialize::serialize_children(node)?);
+        } else {
+            content.push_str(&serialize::serialize_node(node)?);
+        }
     }
     content.push_str("</div>");
     let text_content = serialize::text_content(&included);
@@ -264,4 +311,162 @@ fn enforce_element_limit(document: &Html, limit: Option<usize>) -> Result<(), Er
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::patterns::normalize_spaces;
+
+    #[test]
+    fn returns_article_for_simple_document() {
+        let article = extract(
+            "<html><head><title>Example Article</title></head><body><article><p>This is a long enough paragraph, with punctuation, to become a readable article body for the MVP extractor.</p></article></body></html>",
+            None,
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(article.title.as_deref(), Some("Example Article"));
+        assert!(article.content.contains("readability-page-1"));
+        assert!(article.text_content.contains("long enough paragraph"));
+        assert!(article.length > 25);
+    }
+
+    #[test]
+    fn reports_invalid_base_url_and_element_limit() {
+        let invalid_url = extract(
+            "<html><body><p>text</p></body></html>",
+            Some("not a url"),
+            &Default::default(),
+        );
+        assert!(matches!(invalid_url, Err(Error::InvalidBaseUrl(_))));
+
+        let too_many_elements = extract(
+            "<html><body><main><p>text</p></main></body></html>",
+            None,
+            &ReadabilityOptions { max_elems_to_parse: Some(2), ..Default::default() },
+        );
+        assert!(matches!(too_many_elements, Err(Error::MaxElemsExceeded { .. })));
+    }
+
+    #[test]
+    fn honors_base_element_for_relative_urls() {
+        let fixture = lectito_fixtures::load_fixture("base-url-base-element").unwrap();
+        let article = extract(
+            &fixture.source,
+            Some("http://fakehost/test/page.html"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(article.content.contains(r#"href="http://fakehost/foo/bar/baz.html""#));
+        assert!(article.content.contains(r#"src="http://fakehost/foo/bar/baz.png""#));
+        assert!(
+            !article
+                .content
+                .contains(r#"href="http://fakehost/test/foo/bar/baz.html""#)
+        );
+    }
+
+    #[test]
+    fn repairs_noscript_images_and_scores_br_divs() {
+        let noscript_article = extract(
+            r#"<html><body><article><p>Enough text, with punctuation, to choose the article body for this regression.</p><noscript>&lt;img src="/image.jpg" alt="fallback"&gt;</noscript></article></body></html>"#,
+            Some("https://example.com/story"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            noscript_article
+                .content
+                .contains(r#"src="https://example.com/image.jpg""#)
+        );
+
+        let br_article = extract(
+            "<html><body><div>First long line with enough words to score well.<br><br>Second long line, also with enough words and punctuation to survive extraction.</div></body></html>",
+            None,
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(br_article.text_content.contains("Second long line"));
+    }
+
+    #[test]
+    fn matches_representative_fixture_metadata() {
+        for name in [
+            "wikipedia",
+            "base-url-base-element",
+            "article-author-tag",
+            "parsely-metadata",
+        ] {
+            let fixture = lectito_fixtures::load_fixture(name).unwrap();
+            let article = extract(
+                &fixture.source,
+                Some("http://fakehost/test/page.html"),
+                &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+            )
+            .unwrap()
+            .unwrap();
+
+            let expected = fixture.expected_metadata;
+            if let Some(title) = expected.get("title").and_then(serde_json::Value::as_str) {
+                assert_eq!(article.title.as_deref(), Some(title), "{name} title");
+            }
+            if let Some(byline) = expected.get("byline").and_then(serde_json::Value::as_str) {
+                assert_eq!(article.byline.as_deref(), Some(byline), "{name} byline");
+            }
+            if let Some(excerpt) = expected.get("excerpt").and_then(serde_json::Value::as_str) {
+                assert_eq!(
+                    article.excerpt.as_deref().map(normalize_spaces),
+                    Some(normalize_spaces(excerpt)),
+                    "{name} excerpt"
+                );
+            }
+            assert!(article.length > 0, "{name} should have text");
+            assert!(
+                article.content.contains("readability-page-1"),
+                "{name} should be wrapped"
+            );
+        }
+    }
+
+    #[test]
+    fn returns_content_for_representative_fixture_subset() {
+        let names = [
+            "wikipedia",
+            "dropbox-blog",
+            "cnet",
+            "base-url-base-element",
+            "keep-images",
+            "replace-brs",
+            "article-author-tag",
+            "parsely-metadata",
+        ];
+
+        for name in names {
+            let fixture = lectito_fixtures::load_fixture(name).unwrap();
+            let article = extract(
+                &fixture.source,
+                Some("http://fakehost/test/page.html"),
+                &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+            )
+            .unwrap()
+            .unwrap();
+
+            assert!(article.length > 100, "{name} should have meaningful text");
+            assert!(
+                article.content.contains("readability-page-1"),
+                "{name} should be wrapped"
+            );
+            assert!(
+                !fixture.expected_content.trim().is_empty(),
+                "{name} fixture should include expected content"
+            );
+        }
+    }
 }

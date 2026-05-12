@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use kuchiki::NodeRef;
+use kuchiki::traits::TendrilSink;
 
 use super::patterns;
 
@@ -101,6 +102,30 @@ pub(crate) fn remove_attr(node: &NodeRef, name: &str) {
     if let Some(element) = node.as_element() {
         element.attributes.borrow_mut().remove(name);
     }
+}
+
+pub(crate) fn retag_node(node: &NodeRef, tag: &str) -> Option<NodeRef> {
+    let replacement_doc = kuchiki::parse_html().one(format!("<html><body><{tag}></{tag}></body></html>"));
+    let replacement = select_nodes(&replacement_doc, tag).into_iter().next()?;
+
+    for (name, value) in attrs(node) {
+        set_attr(&replacement, &name, &value);
+    }
+
+    while let Some(child) = node.first_child() {
+        replacement.append(child);
+    }
+    node.insert_before(replacement.clone());
+    node.detach();
+    Some(replacement)
+}
+
+pub(crate) fn replace_with_children(node: &NodeRef) {
+    let children: Vec<_> = node.children().collect();
+    for child in children {
+        node.insert_before(child);
+    }
+    node.detach();
 }
 
 pub(crate) fn node_id(node: &NodeRef) -> usize {

@@ -1,4 +1,5 @@
 use kuchiki::NodeRef;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use url::Url;
 
@@ -10,17 +11,22 @@ use super::patterns::{
 };
 use super::scoring::{class_weight, link_density};
 
+static LAZY_IMAGE_URL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^\s*\S+\.(jpg|jpeg|png|webp)(\?\S*)?\s*$").expect("valid image url regex"));
+static LAZY_IMAGE_SRCSET: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\.(jpg|jpeg|png|webp)\S*\s+\d").expect("valid image srcset regex"));
+
 pub(crate) fn cleanup_article(
     nodes: &[NodeRef], options: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>,
+    article_title: Option<&str>,
 ) {
     for node in nodes {
         clean_styles(node);
         fix_lazy_images(node);
-        dom::remove_matching(
-            node,
-            "script, style, form, fieldset, object, embed, footer, link, aside, iframe",
-        );
+        dom::remove_matching(node, "script, style, form, fieldset, footer, link, aside");
+        clean_embeds(node);
         remove_share_nodes(node);
+        clean_headers(node, article_title, flags);
         if flags.clean_conditionally {
             clean_conditionally(node, options, flags);
         }
@@ -30,6 +36,30 @@ pub(crate) fn cleanup_article(
             clean_classes(node, options);
         }
     }
+}
+
+fn clean_embeds(root: &NodeRef) {
+    for node in dom::select_nodes(root, "object, embed, iframe") {
+        let keep = dom::attrs(&node).values().any(|value| allowed_video(value));
+        if !keep {
+            node.detach();
+        }
+    }
+}
+
+fn allowed_video(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    [
+        "youtube.com",
+        "youtube-nocookie.com",
+        "player.vimeo.com",
+        "dailymotion.com",
+        "player.twitch.tv",
+        "archive.org",
+        "upload.wikimedia.org",
+    ]
+    .iter()
+    .any(|needle| value.contains(needle))
 }
 
 fn clean_styles(node: &NodeRef) {
@@ -51,10 +81,6 @@ fn clean_styles(node: &NodeRef) {
 }
 
 fn fix_lazy_images(root: &NodeRef) {
-    // TODO: should these be constants
-    let image_url = Regex::new(r"(?i)^\s*\S+\.(jpg|jpeg|png|webp)(\?\S*)?\s*$").expect("valid image url regex");
-    let image_srcset = Regex::new(r"(?i)\.(jpg|jpeg|png|webp)\S*\s+\d").expect("valid image srcset regex");
-
     for node in dom::select_nodes(root, "img, picture, figure") {
         let tag = dom::node_name(&node);
         let attrs_snapshot = dom::attrs(&node);
@@ -71,9 +97,9 @@ fn fix_lazy_images(root: &NodeRef) {
                 continue;
             }
 
-            let copy_to = if image_srcset.is_match(&value) {
+            let copy_to = if LAZY_IMAGE_SRCSET.is_match(&value) {
                 Some("srcset")
-            } else if image_url.is_match(&value) {
+            } else if LAZY_IMAGE_URL.is_match(&value) {
                 Some("src")
             } else {
                 None
@@ -96,9 +122,49 @@ fn remove_share_nodes(root: &NodeRef) {
     }
 }
 
+fn clean_headers(root: &NodeRef, article_title: Option<&str>, flags: ExtractFlags) {
+    for node in dom::select_nodes(root, "h1, h2") {
+        let low_weight = class_weight(&node, flags) < 0;
+        let duplicates_title = article_title
+            .map(|title| text_similarity(title, &dom::inner_text(&node)) > 0.75)
+            .unwrap_or(false);
+        if low_weight || duplicates_title {
+            node.detach();
+        }
+    }
+}
+
+fn text_similarity(a: &str, b: &str) -> f32 {
+    let tokens_a: Vec<_> = a
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let tokens_b: Vec<_> = b
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if tokens_a.is_empty() || tokens_b.is_empty() {
+        return 0.0;
+    }
+    let total_len = tokens_b.join(" ").len().max(1) as f32;
+    let unique_b_len = tokens_b
+        .iter()
+        .filter(|token| !tokens_a.contains(token))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .len() as f32;
+    1.0 - unique_b_len / total_len
+}
+
 fn clean_conditionally(root: &NodeRef, options: &ReadabilityOptions, flags: ExtractFlags) {
     for node in dom::select_nodes(root, "table, ul, ol, div, section, header") {
         if dom::node_id(&node) == dom::node_id(root) || dom::has_ancestor_tag(&node, "code", 3) {
+            continue;
+        }
+        if dom::node_name(&node) == "table" && is_data_table(&node) {
             continue;
         }
 
@@ -138,6 +204,30 @@ fn clean_conditionally(root: &NodeRef, options: &ReadabilityOptions, flags: Extr
             node.detach();
         }
     }
+}
+
+fn is_data_table(node: &NodeRef) -> bool {
+    if dom::attr(node, "role").as_deref() == Some("presentation") {
+        return false;
+    }
+
+    if dom::attr(node, "datatable").as_deref() == Some("0") {
+        return false;
+    }
+
+    if dom::attr(node, "summary").is_some()
+        || !dom::select_nodes(node, "caption, col, colgroup, tfoot, thead, th").is_empty()
+    {
+        return true;
+    }
+
+    let rows = dom::select_nodes(node, "tr").len();
+    let columns = dom::select_nodes(node, "tr")
+        .into_iter()
+        .map(|row| dom::select_nodes(&row, "td, th").len())
+        .max()
+        .unwrap_or(0);
+    rows >= 2 && columns >= 2 && rows.saturating_mul(columns) >= 10
 }
 
 fn remove_empty_blocks(root: &NodeRef) {
