@@ -1,10 +1,11 @@
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use lectito_core::{Article, ReadabilityOptions, ReadableOptions, extract, is_probably_readable};
+use lectito_core::{Article, ExtractionDiagnostics, ReadabilityOptions, ReadableOptions, extract};
+use lectito_core::{extract_with_diagnostics, is_probably_readable};
+use owo_colors::OwoColorize;
 use reqwest::blocking::Client;
 use std::{
-    fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -42,6 +43,10 @@ struct ParseArgs {
     char_threshold: usize,
     #[arg(long, default_value_t = 5)]
     nb_top_candidates: usize,
+    #[arg(long)]
+    content_selector: Option<String>,
+    #[arg(long, value_enum)]
+    diagnostic_format: Option<DiagnosticFormat>,
     #[arg(long)]
     disable_json_ld: bool,
     #[arg(long)]
@@ -83,6 +88,12 @@ enum OutputFormat {
     Text,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DiagnosticFormat {
+    Json,
+    Pretty,
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Parse(args) => {
@@ -91,13 +102,18 @@ fn main() -> anyhow::Result<()> {
                 max_elems_to_parse: args.max_elems_to_parse,
                 nb_top_candidates: args.nb_top_candidates,
                 char_threshold: args.char_threshold,
+                content_selector: args.content_selector,
                 classes_to_preserve: args.classes_to_preserve,
                 keep_classes: args.keep_classes,
                 disable_json_ld: args.disable_json_ld,
                 link_density_modifier: 0.0,
             };
-            let article = extract(&html, args.url.as_deref(), &options)?;
-            print_parse_output(article.as_ref(), args.format, args.pretty)?;
+            let report = extract_with_diagnostics(&html, args.url.as_deref(), &options)?;
+            print_parse_output(report.article.as_ref(), args.format, args.pretty)?;
+            if let Some(format) = args.diagnostic_format {
+                io::stdout().flush().context("failed to flush parse output")?;
+                print_diagnostics(&report.diagnostics, format)?;
+            }
         }
         Command::Readable(args) => {
             let html = read_input(args.path.as_deref(), args.stdin, args.url.as_deref())?;
@@ -106,6 +122,88 @@ fn main() -> anyhow::Result<()> {
             print_readable_output(readable, args.json, args.pretty)?;
         }
         Command::Fixture(args) => run_fixture(&args)?,
+    }
+
+    Ok(())
+}
+
+fn print_diagnostics(diagnostics: &ExtractionDiagnostics, format: DiagnosticFormat) -> anyhow::Result<()> {
+    match format {
+        DiagnosticFormat::Json => {
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(diagnostics).context("failed to serialize diagnostics")?
+            );
+        }
+        DiagnosticFormat::Pretty => {
+            eprintln!("{}", "readability diagnostics".bold().blue());
+            eprintln!("{} {:?}", "outcome:".bold(), diagnostics.outcome);
+            if let Some(selector) = &diagnostics.content_selector {
+                let status =
+                    if selector.matched { "matched".green().to_string() } else { "not matched".yellow().to_string() };
+                eprintln!("{} {} ({status})", "content selector:".bold(), selector.selector);
+            }
+            for attempt in &diagnostics.attempts {
+                let marker = if Some(attempt.index) == diagnostics.selected_attempt {
+                    "*".green().to_string()
+                } else {
+                    " ".to_string()
+                };
+                eprintln!(
+                    "{marker} {} {} {} {} {}",
+                    "attempt".bold(),
+                    attempt.index,
+                    "text_len=".dimmed(),
+                    attempt.text_len,
+                    if attempt.accepted {
+                        "accepted".green().to_string()
+                    } else {
+                        "below threshold".yellow().to_string()
+                    }
+                );
+                if let Some(root) = &attempt.selected_root {
+                    eprintln!(
+                        "  {} {} (text {}, links {:.3})",
+                        "root:".bold(),
+                        root.selector,
+                        root.text_len,
+                        root.link_density
+                    );
+                }
+                if !attempt.entry_points.is_empty() {
+                    eprintln!("  {}", "entry points:".bold());
+                    for candidate in attempt.entry_points.iter().take(3) {
+                        eprintln!(
+                            "    {:>8.3} {} text={}",
+                            candidate.score, candidate.node.selector, candidate.node.text_len
+                        );
+                    }
+                }
+                if !attempt.candidates.is_empty() {
+                    eprintln!("  {}", "top candidates:".bold());
+                    for candidate in attempt.candidates.iter().take(5) {
+                        eprintln!(
+                            "    {:>8.3} {} text={} links={:.3}",
+                            candidate.score,
+                            candidate.node.selector,
+                            candidate.node.text_len,
+                            candidate.node.link_density
+                        );
+                    }
+                }
+                if let Some(cleanup) = &attempt.cleanup {
+                    eprintln!(
+                        "  {} text {} -> {}, elements {} -> {} (removed {})",
+                        "cleanup:".bold(),
+                        cleanup.text_len_before,
+                        cleanup.text_len_after,
+                        cleanup.element_count_before,
+                        cleanup.element_count_after,
+                        cleanup.removed_elements
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -123,7 +221,7 @@ fn read_input(path: Option<&Path>, read_stdin: bool, url: Option<&str>) -> anyho
     }
 
     if let Some(path) = path {
-        return fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()));
+        return std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()));
     }
 
     if let Some(url) = url {
@@ -328,13 +426,13 @@ fn write_fixture_diff(
     diff_dir: &Path, fixture_name: &str, expected_content: &str, article: &Article, report: &ContentReport,
 ) -> anyhow::Result<()> {
     let dir = diff_dir.join(sanitize_path_segment(fixture_name));
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    fs::write(dir.join("expected.html"), expected_content)?;
-    fs::write(dir.join("actual.html"), &article.content)?;
-    fs::write(dir.join("expected.txt"), &report.expected_text)?;
-    fs::write(dir.join("actual.txt"), &report.actual_text)?;
-    fs::write(dir.join("expected-tags.txt"), report.expected_tag_sequence.join("\n"))?;
-    fs::write(dir.join("actual-tags.txt"), report.actual_tag_sequence.join("\n"))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::write(dir.join("expected.html"), expected_content)?;
+    std::fs::write(dir.join("actual.html"), &article.content)?;
+    std::fs::write(dir.join("expected.txt"), &report.expected_text)?;
+    std::fs::write(dir.join("actual.txt"), &report.actual_text)?;
+    std::fs::write(dir.join("expected-tags.txt"), report.expected_tag_sequence.join("\n"))?;
+    std::fs::write(dir.join("actual-tags.txt"), report.actual_tag_sequence.join("\n"))?;
     Ok(())
 }
 

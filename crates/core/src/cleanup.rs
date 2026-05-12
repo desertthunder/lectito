@@ -13,6 +13,7 @@ use super::scoring::{class_weight, link_density};
 
 static LAZY_IMAGE_URL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^\s*\S+\.(jpg|jpeg|png|webp)(\?\S*)?\s*$").expect("valid image url regex"));
+
 static LAZY_IMAGE_SRCSET: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\.(jpg|jpeg|png|webp)\S*\s+\d").expect("valid image srcset regex"));
 

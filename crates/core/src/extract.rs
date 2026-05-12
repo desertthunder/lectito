@@ -6,12 +6,22 @@ use scraper::Html;
 use url::Url;
 
 use super::config::{Article, ExtractFlags, ReadabilityOptions};
+use super::diagnostics::{
+    AttemptDiagnostic, CandidateDiagnostic, CandidateSelection, CleanupDiagnostic, ContentSelectorDiagnostic,
+    ExtractionDiagnostics, ExtractionOutcome, ExtractionReport, FlagDiagnostic, NodeDiagnostic,
+};
 use super::error::Error;
 use super::patterns::{MAYBE_CANDIDATE, UNLIKELY_CANDIDATES};
 use super::{cleanup, dom, metadata, patterns, scoring, serialize};
 use super::{metadata::Metadata, scoring::Candidate};
 
 pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions) -> Result<Option<Article>, Error> {
+    Ok(extract_with_diagnostics(html, base_url, options)?.article)
+}
+
+pub fn extract_with_diagnostics(
+    html: &str, base_url: Option<&str>, options: &ReadabilityOptions,
+) -> Result<ExtractionReport, Error> {
     let base_url = base_url
         .map(|base_url| Url::parse(base_url).map_err(|_| Error::InvalidBaseUrl(base_url.to_string())))
         .transpose()?;
@@ -22,6 +32,7 @@ pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions)
 
     let metadata = metadata::extract_metadata(&document, html, options);
     let mut best_attempt: Option<ExtractAttempt> = None;
+    let mut diagnostics = ExtractionDiagnostics::default();
 
     let attempts = [
         ExtractFlags::all(),
@@ -30,18 +41,44 @@ pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions)
         ExtractFlags { strip_unlikely: false, weight_classes: false, clean_conditionally: false },
     ];
 
-    for flags in attempts {
+    for (index, flags) in attempts.into_iter().enumerate() {
         let dom = kuchiki::parse_html().one(html);
         prep_document(&dom, flags);
 
-        let Some(mut attempt) = grab_article(&dom, options, flags, base_url.as_ref(), metadata.title.as_deref())?
+        let Some((mut attempt, attempt_diagnostic)) = grab_article(
+            &dom,
+            options,
+            flags,
+            index,
+            base_url.as_ref(),
+            metadata.title.as_deref(),
+        )?
         else {
+            diagnostics.attempts.push(AttemptDiagnostic {
+                index,
+                flags: flags.into(),
+                candidate_count: 0,
+                candidates: Vec::new(),
+                entry_points: Vec::new(),
+                selected_root: None,
+                cleanup: None,
+                text_len: 0,
+                accepted: false,
+            });
             continue;
         };
 
+        if diagnostics.content_selector.is_none() {
+            diagnostics.content_selector = attempt_diagnostic.content_selector.clone();
+        }
+        diagnostics.attempts.push(attempt_diagnostic.attempt);
+        let diagnostic_index = diagnostics.attempts.len() - 1;
+
         if attempt.text_len >= options.char_threshold {
             attempt.metadata = metadata;
-            return Ok(Some(attempt.into_article()));
+            diagnostics.selected_attempt = Some(diagnostic_index);
+            diagnostics.outcome = ExtractionOutcome::Accepted;
+            return Ok(ExtractionReport { article: Some(attempt.into_article()), diagnostics });
         }
 
         if best_attempt
@@ -49,15 +86,18 @@ pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions)
             .map(|best| attempt.text_len > best.text_len)
             .unwrap_or(true)
         {
+            diagnostics.selected_attempt = Some(diagnostic_index);
             best_attempt = Some(attempt);
         }
     }
 
     let Some(mut attempt) = best_attempt.filter(|attempt| attempt.text_len > 0) else {
-        return Ok(None);
+        diagnostics.outcome = ExtractionOutcome::NoContent;
+        return Ok(ExtractionReport { article: None, diagnostics });
     };
     attempt.metadata = metadata;
-    Ok(Some(attempt.into_article()))
+    diagnostics.outcome = ExtractionOutcome::BestAttempt;
+    Ok(ExtractionReport { article: Some(attempt.into_article()), diagnostics })
 }
 
 struct ExtractAttempt {
@@ -200,6 +240,7 @@ fn unwrap_noscript_images(document: &NodeRef) {
     }
 }
 
+// TODO: should this be in this mod?
 fn unescape_basic_html(value: &str) -> String {
     value
         .replace("&lt;", "<")
@@ -210,12 +251,39 @@ fn unescape_basic_html(value: &str) -> String {
 }
 
 fn grab_article(
-    document: &NodeRef, options: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>,
-    article_title: Option<&str>,
-) -> Result<Option<ExtractAttempt>, Error> {
-    let mut candidates = scoring::score_candidates(document, flags);
+    doc: &NodeRef, opts: &ReadabilityOptions, flags: ExtractFlags, index: usize, base_url: Option<&Url>,
+    title: Option<&str>,
+) -> Result<Option<(ExtractAttempt, GrabDiagnostics)>, Error> {
+    if let Some(selector) = opts.content_selector.as_deref() {
+        if let Some(root) = dom::select_nodes(doc, selector).into_iter().next() {
+            let selector_diagnostic = ContentSelectorDiagnostic {
+                selector: selector.to_string(),
+                matched: true,
+                selected: Some(node_diagnostic(&root)),
+            };
+            let (attempt, cleanup) = serialize_roots(vec![root], opts, flags, base_url, title)?;
+            let attempt_diagnostic = AttemptDiagnostic {
+                index,
+                flags: flags.into(),
+                candidate_count: 0,
+                candidates: Vec::new(),
+                entry_points: Vec::new(),
+                selected_root: selector_diagnostic.selected.clone(),
+                cleanup: Some(cleanup),
+                text_len: attempt.text_len,
+                accepted: attempt.text_len >= opts.char_threshold,
+            };
+            return Ok(Some((
+                attempt,
+                GrabDiagnostics { attempt: attempt_diagnostic, content_selector: Some(selector_diagnostic) },
+            )));
+        }
+    }
+
+    let entry_points = entry_point_candidates(doc);
+    let mut candidates = scoring::score_candidates(doc, flags);
     if candidates.is_empty() {
-        let body = dom::select_nodes(document, "body").into_iter().next();
+        let body = dom::select_nodes(doc, "body").into_iter().next();
         if let Some(body) = body {
             candidates.push(Candidate { node: body, score: 1.0 });
         }
@@ -229,8 +297,37 @@ fn grab_article(
         candidate.score *= 1.0 - scoring::link_density(&candidate.node);
     }
 
+    let selected_entry_id = selected_entry_point(&entry_points).map(|entry_point| {
+        let id = dom::node_id(&entry_point.node);
+        if let Some(candidate) = candidates
+            .iter_mut()
+            .find(|candidate| dom::node_id(&candidate.node) == id)
+        {
+            candidate.score = candidate.score.max(entry_point.score);
+        } else {
+            candidates.push(Candidate { node: entry_point.node.clone(), score: entry_point.score });
+        }
+        id
+    });
+
     candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
-    candidates.truncate(options.nb_top_candidates.max(1));
+
+    let candidate_count = candidates.len();
+
+    candidates.truncate(opts.nb_top_candidates.max(1));
+
+    let candidate_diagnostics: Vec<_> = candidates
+        .iter()
+        .map(|candidate| CandidateDiagnostic {
+            node: node_diagnostic(&candidate.node),
+            score: round_score(candidate.score),
+            selected_by: if selected_entry_id == Some(dom::node_id(&candidate.node)) {
+                CandidateSelection::EntryPointPreselection
+            } else {
+                CandidateSelection::CandidateScoring
+            },
+        })
+        .collect();
 
     let top_candidate = candidates[0].node.clone();
     let top_score = candidates[0].score;
@@ -240,7 +337,7 @@ fn grab_article(
         .map(|candidate| (dom::node_id(&candidate.node), candidate.score))
         .collect();
 
-    let parent = top_candidate.parent().unwrap_or_else(|| document.clone());
+    let parent = top_candidate.parent().unwrap_or_else(|| doc.clone());
     let sibling_threshold = 10.0_f64.max(top_score * 0.2);
     let top_class = dom::attr(&top_candidate, "class").unwrap_or_default();
 
@@ -277,10 +374,49 @@ fn grab_article(
         included.push(top_candidate);
     }
 
-    cleanup::cleanup_article(&included, options, flags, base_url, article_title);
+    let selected_root = included.first().map(node_diagnostic);
+    let (attempt, cleanup) = serialize_roots(included, opts, flags, base_url, title)?;
+    let content_selector = opts
+        .content_selector
+        .as_ref()
+        .map(|selector| ContentSelectorDiagnostic { selector: selector.clone(), matched: false, selected: None });
+    let attempt_diagnostic = AttemptDiagnostic {
+        index,
+        flags: flags.into(),
+        candidate_count,
+        candidates: candidate_diagnostics,
+        entry_points: entry_points
+            .iter()
+            .map(|entry_point| entry_point.diagnostic.clone())
+            .collect(),
+        selected_root,
+        cleanup: Some(cleanup),
+        text_len: attempt.text_len,
+        accepted: attempt.text_len >= opts.char_threshold,
+    };
+
+    Ok(Some((
+        attempt,
+        GrabDiagnostics { attempt: attempt_diagnostic, content_selector },
+    )))
+}
+
+struct GrabDiagnostics {
+    attempt: AttemptDiagnostic,
+    content_selector: Option<ContentSelectorDiagnostic>,
+}
+
+fn serialize_roots(
+    roots: Vec<NodeRef>, opts: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>, title: Option<&str>,
+) -> Result<(ExtractAttempt, CleanupDiagnostic), Error> {
+    let text_len_before = serialize::text_content(&roots).encode_utf16().count();
+    let element_count_before = roots.iter().map(element_count).sum();
+    let root_selectors = roots.iter().map(node_selector).collect();
+
+    cleanup::cleanup_article(&roots, opts, flags, base_url, title);
 
     let mut content = String::from(r#"<div id="readability-page-1" class="page">"#);
-    for node in &included {
+    for node in &roots {
         if dom::node_name(node) == "body" {
             content.push_str(&serialize::serialize_children(node)?);
         } else {
@@ -288,15 +424,132 @@ fn grab_article(
         }
     }
     content.push_str("</div>");
-    let text_content = serialize::text_content(&included);
+    let text_content = serialize::text_content(&roots);
     let text_len = text_content.encode_utf16().count();
+    let element_count_after = roots.iter().map(element_count).sum();
 
-    Ok(Some(ExtractAttempt {
-        metadata: Metadata::default(),
-        content,
-        text_content,
-        text_len,
-    }))
+    let attempt = ExtractAttempt { metadata: Metadata::default(), content, text_content, text_len };
+    let cleanup = CleanupDiagnostic {
+        roots: root_selectors,
+        text_len_before,
+        text_len_after: text_len,
+        element_count_before,
+        element_count_after,
+        removed_elements: element_count_before.saturating_sub(element_count_after),
+    };
+
+    Ok((attempt, cleanup))
+}
+
+impl From<ExtractFlags> for FlagDiagnostic {
+    fn from(flags: ExtractFlags) -> Self {
+        Self {
+            strip_unlikely: flags.strip_unlikely,
+            weight_classes: flags.weight_classes,
+            clean_conditionally: flags.clean_conditionally,
+        }
+    }
+}
+
+struct EntryPointCandidate {
+    node: NodeRef,
+    score: f64,
+    diagnostic: CandidateDiagnostic,
+}
+
+fn entry_point_candidates(document: &NodeRef) -> Vec<EntryPointCandidate> {
+    // TODO: could this be a constant?
+    let selectors = [
+        "article",
+        "main",
+        r#"[role="main"]"#,
+        "#content",
+        "#main",
+        "#article",
+        ".content",
+        ".main",
+        ".article",
+        ".post",
+        ".entry-content",
+    ];
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for selector in selectors {
+        for node in dom::select_nodes(document, selector) {
+            if !seen.insert(dom::node_id(&node)) {
+                continue;
+            }
+            let text_len = dom::inner_text(&node).chars().count();
+            if text_len < 80 {
+                continue;
+            }
+            let link_density = scoring::link_density(&node);
+            if link_density > 0.65 {
+                continue;
+            }
+            let score = (text_len as f64 / 25.0) * (1.0 - link_density).max(0.0)
+                + scoring::class_weight(&node, ExtractFlags::all()) as f64;
+            let diagnostic = CandidateDiagnostic {
+                node: node_diagnostic(&node),
+                score: round_score(score),
+                selected_by: CandidateSelection::EntryPointPreselection,
+            };
+            candidates.push(EntryPointCandidate { node, score, diagnostic });
+        }
+    }
+
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+    candidates.truncate(8);
+    candidates
+}
+
+fn selected_entry_point(entry_points: &[EntryPointCandidate]) -> Option<Candidate> {
+    let best = entry_points.first()?;
+    if best.diagnostic.node.text_len < 140 || best.score < 8.0 {
+        return None;
+    }
+    Some(Candidate { node: best.node.clone(), score: best.score + 25.0 })
+}
+
+fn node_diagnostic(node: &NodeRef) -> NodeDiagnostic {
+    let class = dom::attr(node, "class").unwrap_or_default();
+    NodeDiagnostic {
+        selector: node_selector(node),
+        tag: dom::node_name(node),
+        id: dom::attr(node, "id"),
+        classes: class.split_whitespace().map(str::to_string).collect(),
+        text_len: dom::inner_text(node).encode_utf16().count(),
+        link_density: round_score(scoring::link_density(node)),
+    }
+}
+
+fn node_selector(node: &NodeRef) -> String {
+    let tag = dom::node_name(node);
+    if tag.is_empty() {
+        return "<node>".to_string();
+    }
+    if let Some(id) = dom::attr(node, "id") {
+        if !id.trim().is_empty() {
+            return format!("{tag}#{id}");
+        }
+    }
+    if let Some(class) = dom::attr(node, "class") {
+        let mut classes = class.split_whitespace().take(3).collect::<Vec<_>>();
+        if !classes.is_empty() {
+            classes.insert(0, tag.as_str());
+            return classes.join(".");
+        }
+    }
+    tag
+}
+
+fn element_count(node: &NodeRef) -> usize {
+    node.descendants().filter(|node| node.as_element().is_some()).count()
+}
+
+fn round_score(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
 }
 
 fn enforce_element_limit(document: &Html, limit: Option<usize>) -> Result<(), Error> {
@@ -394,6 +647,71 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(br_article.text_content.contains("Second long line"));
+    }
+
+    #[test]
+    fn content_selector_override_forces_root_and_reports_diagnostics() {
+        let report = extract_with_diagnostics(
+            r#"
+            <html><body>
+                <main>
+                    <p>Navigation teaser text that should lose when the explicit selector points elsewhere.</p>
+                </main>
+                <section id="forced">
+                    <p>This forced article body has enough punctuation, enough words, and enough detail to become the returned content.</p>
+                </section>
+            </body></html>
+            "#,
+            None,
+            &ReadabilityOptions {
+                char_threshold: 0,
+                content_selector: Some("#forced".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let article = report.article.unwrap();
+        assert!(article.text_content.contains("forced article body"));
+        assert!(!article.text_content.contains("Navigation teaser"));
+
+        let selector = report.diagnostics.content_selector.unwrap();
+        assert_eq!(selector.selector, "#forced");
+        assert!(selector.matched);
+        assert_eq!(selector.selected.unwrap().selector, "section#forced");
+        assert!(report.diagnostics.attempts[0].cleanup.is_some());
+    }
+
+    #[test]
+    fn unmatched_content_selector_falls_back_to_scoring_and_reports_candidates() {
+        let report = extract_with_diagnostics(
+            r#"
+            <html><body>
+                <article class="story">
+                    <p>This article body is long enough, punctuated enough, and clean enough to be selected by normal scoring.</p>
+                </article>
+            </body></html>
+            "#,
+            None,
+            &ReadabilityOptions {
+                char_threshold: 0,
+                content_selector: Some(".missing".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            report
+                .article
+                .unwrap()
+                .text_content
+                .contains("selected by normal scoring")
+        );
+        let selector = report.diagnostics.content_selector.unwrap();
+        assert!(!selector.matched);
+        assert!(report.diagnostics.attempts[0].candidate_count > 0);
+        assert!(!report.diagnostics.attempts[0].entry_points.is_empty());
     }
 
     #[test]
