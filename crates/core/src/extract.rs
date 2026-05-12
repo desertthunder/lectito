@@ -12,7 +12,7 @@ use super::diagnostics::{
 };
 use super::error::Error;
 use super::patterns::{MAYBE_CANDIDATE, UNLIKELY_CANDIDATES};
-use super::{cleanup, dom, metadata, patterns, scoring, serialize};
+use super::{cleanup, dom, json_schema, metadata, patterns, scoring, serialize};
 use super::{metadata::Metadata, scoring::Candidate};
 
 pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions) -> Result<Option<Article>, Error> {
@@ -30,7 +30,7 @@ pub fn extract_with_diagnostics(
     enforce_element_limit(&document, options.max_elems_to_parse)?;
     let base_url = effective_base_url(&document, base_url.as_ref());
 
-    let metadata = metadata::extract_metadata(&document, html, options);
+    let metadata = metadata::extract_metadata(&document, html, options, base_url.as_ref());
     let mut best_attempt: Option<ExtractAttempt> = None;
     let mut diagnostics = ExtractionDiagnostics::default();
 
@@ -75,6 +75,7 @@ pub fn extract_with_diagnostics(
         let diagnostic_index = diagnostics.attempts.len() - 1;
 
         if attempt.text_len >= options.char_threshold {
+            attempt = json_schema::apply_schema_fallback(html, attempt, &metadata, options, flags, base_url.as_ref())?;
             attempt.metadata = metadata;
             diagnostics.selected_attempt = Some(diagnostic_index);
             diagnostics.outcome = ExtractionOutcome::Accepted;
@@ -95,16 +96,24 @@ pub fn extract_with_diagnostics(
         diagnostics.outcome = ExtractionOutcome::NoContent;
         return Ok(ExtractionReport { article: None, diagnostics });
     };
+    attempt = json_schema::apply_schema_fallback(
+        html,
+        attempt,
+        &metadata,
+        options,
+        ExtractFlags { strip_unlikely: false, weight_classes: false, clean_conditionally: false },
+        base_url.as_ref(),
+    )?;
     attempt.metadata = metadata;
     diagnostics.outcome = ExtractionOutcome::BestAttempt;
     Ok(ExtractionReport { article: Some(attempt.into_article()), diagnostics })
 }
 
-struct ExtractAttempt {
+pub(crate) struct ExtractAttempt {
     metadata: Metadata,
     content: String,
-    text_content: String,
-    text_len: usize,
+    pub(crate) text_content: String,
+    pub(crate) text_len: usize,
 }
 
 impl ExtractAttempt {
@@ -124,11 +133,14 @@ impl ExtractAttempt {
             excerpt: self.metadata.excerpt,
             site_name: self.metadata.site_name,
             published_time: self.metadata.published_time,
+            image: self.metadata.image,
+            domain: self.metadata.domain,
+            favicon: self.metadata.favicon,
         }
     }
 }
 
-fn prep_document(document: &NodeRef, flags: ExtractFlags) {
+pub(crate) fn prep_document(document: &NodeRef, flags: ExtractFlags) {
     unwrap_noscript_images(document);
     dom::remove_matching(document, "script, style");
     normalize_markup(document);
@@ -406,7 +418,7 @@ struct GrabDiagnostics {
     content_selector: Option<ContentSelectorDiagnostic>,
 }
 
-fn serialize_roots(
+pub(crate) fn serialize_roots(
     roots: Vec<NodeRef>, opts: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>, title: Option<&str>,
 ) -> Result<(ExtractAttempt, CleanupDiagnostic), Error> {
     let text_len_before = serialize::text_content(&roots).encode_utf16().count();
@@ -544,7 +556,7 @@ fn node_selector(node: &NodeRef) -> String {
     tag
 }
 
-fn element_count(node: &NodeRef) -> usize {
+pub(crate) fn element_count(node: &NodeRef) -> usize {
     node.descendants().filter(|node| node.as_element().is_some()).count()
 }
 
@@ -712,6 +724,32 @@ mod tests {
         assert!(!selector.matched);
         assert!(report.diagnostics.attempts[0].candidate_count > 0);
         assert!(!report.diagnostics.attempts[0].entry_points.is_empty());
+    }
+
+    #[test]
+    fn metadata_expands_image_domain_favicon_and_deduplicated_author() {
+        let article = extract(
+            r#"
+            <html><head>
+                <title>Metadata Story</title>
+                <link rel="canonical" href="https://www.example.com/story/one">
+                <link rel="icon" href="/icon.png">
+                <meta property="og:image" content="/lead.jpg">
+                <meta name="author" content="Ada Lovelace, Ada Lovelace; Grace Hopper">
+            </head><body>
+                <article><p>This article has enough text and punctuation to be extracted as the main content.</p></article>
+            </body></html>
+            "#,
+            Some("https://www.example.com/story/one"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(article.byline.as_deref(), Some("Ada Lovelace, Grace Hopper"));
+        assert_eq!(article.image.as_deref(), Some("https://www.example.com/lead.jpg"));
+        assert_eq!(article.domain.as_deref(), Some("example.com"));
+        assert_eq!(article.favicon.as_deref(), Some("https://www.example.com/icon.png"));
     }
 
     #[test]

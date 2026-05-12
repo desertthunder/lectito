@@ -21,11 +21,6 @@ pub(crate) static NEGATIVE: Lazy<Regex> = Lazy::new(|| {
         .expect("valid negative regex")
 });
 
-pub(crate) static JSON_LD_ARTICLE_TYPES: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^Article|AdvertiserContentArticle|NewsArticle|AnalysisNewsArticle|AskPublicNewsArticle|BackgroundNewsArticle|OpinionNewsArticle|ReportageNewsArticle|ReviewNewsArticle|Report|SatiricalArticle|ScholarlyArticle|MedicalScholarlyArticle|SocialMediaPosting|BlogPosting|LiveBlogPosting|DiscussionForumPosting|TechArticle|APIReference$")
-        .expect("valid json-ld article type regex")
-});
-
 pub(crate) static NORMALIZE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s{2,}").expect("valid whitespace regex"));
 
 pub(crate) static COMMA: Lazy<Regex> = Lazy::new(|| {

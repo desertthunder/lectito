@@ -399,6 +399,9 @@ fn metadata_mismatches(expected: &serde_json::Value, article: &Article) -> Vec<S
         ("excerpt", article.excerpt.as_deref()),
         ("siteName", article.site_name.as_deref()),
         ("publishedTime", article.published_time.as_deref()),
+        ("image", article.image.as_deref()),
+        ("domain", article.domain.as_deref()),
+        ("favicon", article.favicon.as_deref()),
     ];
 
     checks

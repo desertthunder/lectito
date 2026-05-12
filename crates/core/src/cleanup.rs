@@ -23,8 +23,12 @@ pub(crate) fn cleanup_article(
 ) {
     for node in nodes {
         clean_styles(node);
+        clean_unsafe_attrs(node);
         fix_lazy_images(node);
-        dom::remove_matching(node, "script, style, form, fieldset, footer, link, aside");
+        dom::remove_matching(
+            node,
+            "script, style, noscript, base, form, fieldset, footer, link, aside",
+        );
         clean_embeds(node);
         remove_share_nodes(node);
         clean_headers(node, article_title, flags);
@@ -37,6 +41,28 @@ pub(crate) fn cleanup_article(
             clean_classes(node, options);
         }
     }
+}
+
+fn clean_unsafe_attrs(node: &NodeRef) {
+    let attrs = dom::attrs(node);
+    for (name, value) in attrs {
+        let lower_name = name.to_ascii_lowercase();
+        let lower_value = value.trim_start().to_ascii_lowercase();
+        if lower_name.starts_with("on")
+            || lower_name == "srcdoc"
+            || (matches!(lower_name.as_str(), "href" | "src") && unsafe_url_value(&lower_value))
+        {
+            dom::remove_attr(node, &name);
+        }
+    }
+
+    for child in node.children() {
+        clean_unsafe_attrs(&child);
+    }
+}
+
+fn unsafe_url_value(value: &str) -> bool {
+    value.starts_with("javascript:") || value.starts_with("data:text/html")
 }
 
 fn clean_embeds(root: &NodeRef) {

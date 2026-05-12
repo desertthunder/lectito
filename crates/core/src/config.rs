@@ -51,6 +51,9 @@ pub struct Article {
     pub excerpt: Option<String>,
     pub site_name: Option<String>,
     pub published_time: Option<String>,
+    pub image: Option<String>,
+    pub domain: Option<String>,
+    pub favicon: Option<String>,
 }
 
 #[derive(Clone, Copy)]

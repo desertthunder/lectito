@@ -4,6 +4,7 @@ mod diagnostics;
 mod dom;
 mod error;
 mod extract;
+mod json_schema;
 mod metadata;
 mod patterns;
 mod readable;

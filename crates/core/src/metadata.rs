@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
 use scraper::Html;
-use serde_json::Value;
 use url::Url;
 
 use super::config::ReadabilityOptions;
-use super::patterns::{self, JSON_LD_ARTICLE_TYPES};
+use super::{json_schema, patterns};
 
 const TITLE_SEPARATORS: &[&str] = &[" | ", " - ", " – ", " — ", " \\ ", " / ", " > ", " » "];
 
@@ -16,12 +15,18 @@ pub(crate) struct Metadata {
     pub(crate) excerpt: Option<String>,
     pub(crate) site_name: Option<String>,
     pub(crate) published_time: Option<String>,
+    pub(crate) image: Option<String>,
+    pub(crate) domain: Option<String>,
+    pub(crate) favicon: Option<String>,
+    pub(crate) schema_text: Option<String>,
     pub(crate) lang: Option<String>,
     pub(crate) dir: Option<String>,
 }
 
-pub(crate) fn extract_metadata(document: &Html, html: &str, options: &ReadabilityOptions) -> Metadata {
-    let mut metadata = if options.disable_json_ld { Metadata::default() } else { extract_json_ld(html) };
+pub(crate) fn extract_metadata(
+    document: &Html, html: &str, options: &ReadabilityOptions, base_url: Option<&Url>,
+) -> Metadata {
+    let mut metadata = if options.disable_json_ld { Metadata::default() } else { json_schema::extract_json_ld(html) };
     let mut values = HashMap::<String, String>::new();
     let meta_selector = patterns::selector("meta");
 
@@ -66,6 +71,7 @@ pub(crate) fn extract_metadata(document: &Html, html: &str, options: &Readabilit
                     "title",
                     "twitter:title",
                     "parsely-title",
+                    "sailthru:title",
                 ],
             )
         })
@@ -79,12 +85,15 @@ pub(crate) fn extract_metadata(document: &Html, html: &str, options: &Readabilit
                     "dc:creator",
                     "dcterm:creator",
                     "author",
+                    "sailthru:author",
+                    "authorlist",
+                    "citation_author",
                     "parsely-author",
                     "article:author",
                     "og:article:author",
                 ],
             )
-            .filter(|value| !is_url(value))
+            .and_then(|value| normalize_byline(&value))
         })
         .or_else(|| byline_from_document(document));
     metadata.excerpt = metadata.excerpt.or_else(|| {
@@ -98,13 +107,30 @@ pub(crate) fn extract_metadata(document: &Html, html: &str, options: &Readabilit
                 "weibo:webpage:description",
                 "description",
                 "twitter:description",
+                "sailthru:description",
             ],
         )
     });
-    metadata.site_name = metadata.site_name.or_else(|| first_value(&values, &["og:site_name"]));
+    metadata.site_name = metadata
+        .site_name
+        .or_else(|| first_value(&values, &["og:site_name", "application-name"]));
     metadata.published_time = metadata
         .published_time
-        .or_else(|| first_value(&values, &["article:published_time", "parsely-pub-date"]));
+        .or_else(|| first_value(&values, &["article:published_time", "parsely-pub-date", "publishdate"]));
+    metadata.image = metadata
+        .image
+        .or_else(|| first_value(&values, &["og:image", "twitter:image", "sailthru:image:full", "image"]))
+        .and_then(|image| absolutize_url(&image, base_url));
+    metadata.favicon = metadata
+        .favicon
+        .or_else(|| first_value(&values, &["og:image:favicon"]))
+        .or_else(|| favicon_from_document(document))
+        .or_else(|| base_url.and_then(|_| absolutize_url("/favicon.ico", base_url)));
+    metadata.favicon = metadata.favicon.and_then(|favicon| absolutize_url(&favicon, base_url));
+    metadata.domain = metadata
+        .domain
+        .or_else(|| canonical_url(document).and_then(|url| domain_from_url(&url)))
+        .or_else(|| base_url.and_then(|url| url.host_str().map(strip_www)));
 
     let html_selector = patterns::selector("html");
     let body_selector = patterns::selector("body");
@@ -128,94 +154,22 @@ pub(crate) fn extract_metadata(document: &Html, html: &str, options: &Readabilit
     metadata
 }
 
-fn extract_json_ld(html: &str) -> Metadata {
-    let document = Html::parse_document(html);
-    let script_selector = patterns::selector(r#"script[type="application/ld+json"]"#);
-
-    for script in document.select(&script_selector) {
-        let content = script.text().collect::<String>();
-        let content = content.trim().trim_start_matches("<![CDATA[").trim_end_matches("]]>");
-        let Ok(value) = serde_json::from_str::<Value>(content) else {
-            continue;
-        };
-        if let Some(article) = find_json_ld_article(&value) {
-            return metadata_from_json_ld(article);
-        }
-    }
-
-    Metadata::default()
-}
-
-fn find_json_ld_article(value: &Value) -> Option<&Value> {
-    match value {
-        Value::Array(items) => items.iter().find_map(find_json_ld_article),
-        Value::Object(map) => {
-            if let Some(graph) = map.get("@graph").and_then(Value::as_array) {
-                if let Some(article) = graph.iter().find_map(find_json_ld_article) {
-                    return Some(article);
-                }
-            }
-
-            if map.get("@type").is_some_and(json_ld_type_is_article) { Some(value) } else { None }
-        }
-        _ => None,
-    }
-}
-
-fn json_ld_type_is_article(value: &Value) -> bool {
-    match value {
-        Value::String(kind) => JSON_LD_ARTICLE_TYPES.is_match(kind.trim_start_matches("https://schema.org/")),
-        Value::Array(kinds) => kinds.iter().any(json_ld_type_is_article),
-        _ => false,
-    }
-}
-
-fn metadata_from_json_ld(value: &Value) -> Metadata {
-    Metadata {
-        title: string_field(value, "name").or_else(|| string_field(value, "headline")),
-        byline: byline_from_json_ld(value.get("author")),
-        excerpt: string_field(value, "description"),
-        site_name: value
-            .get("publisher")
-            .and_then(|publisher| string_field(publisher, "name")),
-        published_time: string_field(value, "datePublished"),
-        lang: None,
-        dir: None,
-    }
-}
-
-fn byline_from_json_ld(value: Option<&Value>) -> Option<String> {
-    match value? {
-        Value::String(author) => Some(author.trim().to_string()),
-        Value::Object(_) => string_field(value?, "name"),
-        Value::Array(authors) => {
-            let names: Vec<_> = authors
-                .iter()
-                .filter_map(|author| string_field(author, "name"))
-                .collect();
-            (!names.is_empty()).then(|| names.join(", "))
-        }
-        _ => None,
-    }
-}
-
-fn string_field(value: &Value, field: &str) -> Option<String> {
-    value
-        .get(field)?
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(decode_html_entities)
-}
-
 fn meta_property_key(name: &str) -> bool {
     let Some((prefix, key)) = name.split_once(':') else {
-        return false;
+        return matches!(name, "author" | "description" | "image" | "title");
     };
     matches!(prefix, "article" | "dc" | "dcterm" | "og" | "twitter")
         && matches!(
             key,
-            "article:author" | "author" | "creator" | "description" | "published_time" | "title" | "site_name"
+            "article:author"
+                | "author"
+                | "creator"
+                | "description"
+                | "image"
+                | "image:favicon"
+                | "published_time"
+                | "title"
+                | "site_name"
         )
 }
 
@@ -226,12 +180,24 @@ fn meta_name_key(name: &str) -> bool {
         .or_else(|| name.strip_prefix("og:"))
         .or_else(|| name.strip_prefix("twitter:"))
         .or_else(|| name.strip_prefix("parsely-"))
+        .or_else(|| name.strip_prefix("sailthru:"))
         .or_else(|| name.strip_prefix("weibo:article:"))
         .or_else(|| name.strip_prefix("weibo:webpage:"))
         .unwrap_or(name);
     matches!(
         name,
-        "author" | "creator" | "pub-date" | "description" | "title" | "site_name"
+        "application-name"
+            | "author"
+            | "authorlist"
+            | "citation_author"
+            | "creator"
+            | "image"
+            | "image:full"
+            | "pub-date"
+            | "publishdate"
+            | "description"
+            | "title"
+            | "site_name"
     )
 }
 
@@ -345,6 +311,73 @@ fn clean_byline(value: &str) -> String {
     patterns::normalize_spaces(value.trim())
 }
 
+pub(crate) fn normalize_byline(value: &str) -> Option<String> {
+    if is_url(value) {
+        return None;
+    }
+
+    let mut seen = Vec::<String>::new();
+    for part in value.split([',', ';']) {
+        let Some(author) = clean_metadata_value(part) else {
+            continue;
+        };
+        let lower = author.to_lowercase();
+        if matches!(lower.as_str(), "author" | "authors" | "by" | "byline") {
+            continue;
+        }
+        if !seen.iter().any(|existing| existing.eq_ignore_ascii_case(&author)) {
+            seen.push(author);
+        }
+    }
+
+    (!seen.is_empty()).then(|| seen.join(", "))
+}
+
+pub(crate) fn clean_metadata_value(value: &str) -> Option<String> {
+    let value = decode_html_entities(&patterns::normalize_spaces(value.trim()));
+    if value.is_empty() || is_placeholder_value(&value) { None } else { Some(value) }
+}
+
+fn is_placeholder_value(value: &str) -> bool {
+    let lower = value.trim().to_lowercase();
+    lower.contains("{{")
+        || lower.contains("}}")
+        || lower.contains("#{")
+        || lower == "null"
+        || lower == "undefined"
+        || lower == "n/a"
+}
+
+fn favicon_from_document(document: &Html) -> Option<String> {
+    let selector = patterns::selector(r#"link[rel~="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"]"#);
+    document
+        .select(&selector)
+        .find_map(|link| link.value().attr("href").and_then(clean_metadata_value))
+}
+
+fn canonical_url(document: &Html) -> Option<String> {
+    let selector = patterns::selector(r#"link[rel="canonical"]"#);
+    document
+        .select(&selector)
+        .find_map(|link| link.value().attr("href").and_then(clean_metadata_value))
+}
+
+fn absolutize_url(value: &str, base_url: Option<&Url>) -> Option<String> {
+    let value = clean_metadata_value(value)?;
+    if let Ok(url) = Url::parse(&value) {
+        return Some(url.to_string());
+    }
+    base_url.and_then(|base_url| base_url.join(&value).ok().map(|url| url.to_string()))
+}
+
+fn domain_from_url(value: &str) -> Option<String> {
+    Url::parse(value).ok()?.host_str().map(strip_www)
+}
+
+fn strip_www(value: &str) -> String {
+    value.strip_prefix("www.").unwrap_or(value).to_string()
+}
+
 pub(crate) fn first_paragraph_excerpt(content: &str) -> Option<String> {
     let document = Html::parse_fragment(content);
     first_excerpt_for_selector(&document, "p").or_else(|| first_excerpt_for_selector(&document, "div"))
@@ -369,7 +402,7 @@ fn first_value(values: &HashMap<String, String>, keys: &[&str]) -> Option<String
         .filter(|value| !value.trim().is_empty())
 }
 
-fn decode_html_entities(value: &str) -> String {
+pub(crate) fn decode_html_entities(value: &str) -> String {
     let mut decoded = String::with_capacity(value.len());
     let mut rest = value;
 
