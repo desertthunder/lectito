@@ -39,6 +39,7 @@ pub struct AttemptDiagnostic {
     pub entry_points: Vec<CandidateDiagnostic>,
     pub selected_root: Option<NodeDiagnostic>,
     pub cleanup: Option<CleanupDiagnostic>,
+    pub recovery: RecoveryDiagnostic,
     pub text_len: usize,
     pub accepted: bool,
 }
@@ -82,4 +83,10 @@ pub struct CleanupDiagnostic {
     pub element_count_before: usize,
     pub element_count_after: usize,
     pub removed_elements: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct RecoveryDiagnostic {
+    pub shadow_roots_flattened: usize,
+    pub mobile_rules_applied: usize,
 }

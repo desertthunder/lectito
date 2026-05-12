@@ -50,7 +50,7 @@ pub(crate) fn apply_schema_fallback(
     let extracted_len = normalized_match_text(&attempt.text_content).chars().count();
     let schema_len = normalized_schema.chars().count();
     let document = kuchiki::parse_html().one(html);
-    prep_document(&document, flags);
+    prep_document(&document, opts, flags);
     if let Some(root) = smallest_schema_match(&document, &normalized_schema) {
         let matched_len = normalized_match_text(&dom::inner_text(&root)).chars().count();
         let (fallback, _) = serialize_roots(vec![root], opts, flags, base_url, metadata.title.as_deref())?;

@@ -8,11 +8,11 @@ use url::Url;
 use super::config::{Article, ExtractFlags, ReadabilityOptions};
 use super::diagnostics::{
     AttemptDiagnostic, CandidateDiagnostic, CandidateSelection, CleanupDiagnostic, ContentSelectorDiagnostic,
-    ExtractionDiagnostics, ExtractionOutcome, ExtractionReport, FlagDiagnostic, NodeDiagnostic,
+    ExtractionDiagnostics, ExtractionOutcome, ExtractionReport, FlagDiagnostic, NodeDiagnostic, RecoveryDiagnostic,
 };
 use super::error::Error;
 use super::patterns::{MAYBE_CANDIDATE, UNLIKELY_CANDIDATES};
-use super::{cleanup, dom, json_schema, metadata, patterns, scoring, serialize};
+use super::{cleanup, dom, json_schema, markdown, metadata, normalize, patterns, recovery, scoring, serialize};
 use super::{metadata::Metadata, scoring::Candidate};
 
 pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions) -> Result<Option<Article>, Error> {
@@ -22,6 +22,8 @@ pub fn extract(html: &str, base_url: Option<&str>, options: &ReadabilityOptions)
 pub fn extract_with_diagnostics(
     html: &str, base_url: Option<&str>, options: &ReadabilityOptions,
 ) -> Result<ExtractionReport, Error> {
+    let (working_html, source_recovery) = recovery::recover_html_snapshot(html);
+    let html = working_html.as_str();
     let base_url = base_url
         .map(|base_url| Url::parse(base_url).map_err(|_| Error::InvalidBaseUrl(base_url.to_string())))
         .transpose()?;
@@ -43,13 +45,15 @@ pub fn extract_with_diagnostics(
 
     for (index, flags) in attempts.into_iter().enumerate() {
         let dom = kuchiki::parse_html().one(html);
-        prep_document(&dom, flags);
+        let mut recovery = prep_document(&dom, options, flags);
+        recovery.shadow_roots_flattened += source_recovery.shadow_roots_flattened;
 
         let Some((mut attempt, attempt_diagnostic)) = grab_article(
             &dom,
             options,
             flags,
             index,
+            recovery.clone(),
             base_url.as_ref(),
             metadata.title.as_deref(),
         )?
@@ -62,6 +66,7 @@ pub fn extract_with_diagnostics(
                 entry_points: Vec::new(),
                 selected_root: None,
                 cleanup: None,
+                recovery,
                 text_len: 0,
                 accepted: false,
             });
@@ -127,6 +132,7 @@ impl ExtractAttempt {
             byline: self.metadata.byline,
             dir: self.metadata.dir,
             lang: self.metadata.lang,
+            markdown: markdown::html_to_markdown(&self.content),
             content: self.content,
             text_content: self.text_content,
             length: self.text_len,
@@ -140,7 +146,10 @@ impl ExtractAttempt {
     }
 }
 
-pub(crate) fn prep_document(document: &NodeRef, flags: ExtractFlags) {
+pub(crate) fn prep_document(
+    document: &NodeRef, options: &ReadabilityOptions, flags: ExtractFlags,
+) -> RecoveryDiagnostic {
+    let recovery = recovery::recover(document, options.mobile_viewport_width);
     unwrap_noscript_images(document);
     dom::remove_matching(document, "script, style");
     normalize_markup(document);
@@ -175,6 +184,7 @@ pub(crate) fn prep_document(document: &NodeRef, flags: ExtractFlags) {
             }
         }
     }
+    recovery
 }
 
 fn normalize_markup(document: &NodeRef) {
@@ -263,8 +273,8 @@ fn unescape_basic_html(value: &str) -> String {
 }
 
 fn grab_article(
-    doc: &NodeRef, opts: &ReadabilityOptions, flags: ExtractFlags, index: usize, base_url: Option<&Url>,
-    title: Option<&str>,
+    doc: &NodeRef, opts: &ReadabilityOptions, flags: ExtractFlags, index: usize, recovery: RecoveryDiagnostic,
+    base_url: Option<&Url>, title: Option<&str>,
 ) -> Result<Option<(ExtractAttempt, GrabDiagnostics)>, Error> {
     if let Some(selector) = opts.content_selector.as_deref() {
         if let Some(root) = dom::select_nodes(doc, selector).into_iter().next() {
@@ -282,6 +292,7 @@ fn grab_article(
                 entry_points: Vec::new(),
                 selected_root: selector_diagnostic.selected.clone(),
                 cleanup: Some(cleanup),
+                recovery,
                 text_len: attempt.text_len,
                 accepted: attempt.text_len >= opts.char_threshold,
             };
@@ -403,6 +414,7 @@ fn grab_article(
             .collect(),
         selected_root,
         cleanup: Some(cleanup),
+        recovery,
         text_len: attempt.text_len,
         accepted: attempt.text_len >= opts.char_threshold,
     };
@@ -426,6 +438,7 @@ pub(crate) fn serialize_roots(
     let root_selectors = roots.iter().map(node_selector).collect();
 
     cleanup::cleanup_article(&roots, opts, flags, base_url, title);
+    normalize::normalize_article(&roots, title);
 
     let mut content = String::from(r#"<div id="readability-page-1" class="page">"#);
     for node in &roots {
@@ -750,6 +763,73 @@ mod tests {
         assert_eq!(article.image.as_deref(), Some("https://www.example.com/lead.jpg"));
         assert_eq!(article.domain.as_deref(), Some("example.com"));
         assert_eq!(article.favicon.as_deref(), Some("https://www.example.com/icon.png"));
+    }
+
+    #[test]
+    fn normalization_cleans_common_output_shapes_before_markdown() {
+        let article = extract(
+            r##"
+            <html><head><title>Code Story</title></head><body>
+                <article>
+                    <h1>Code Story</h1>
+                    <h2><a href="#code">Code Samples</a></h2>
+                    <p>Alpha<wbr>Beta<br><br><br>Gamma</p>
+                    <pre>let value = 1;</pre>
+                    <div><span></span></div>
+                </article>
+            </body></html>
+            "##,
+            None,
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(!article.content.contains("<wbr"));
+        assert!(!article.content.contains("<br><br><br>"));
+        assert!(article.content.contains("<h2>Code Samples</h2>"));
+        assert!(article.content.contains("<pre><code>let value = 1;</code></pre>"));
+        assert!(article.markdown.contains("## Code Samples"));
+        assert!(article.markdown.contains("    let value = 1;"));
+    }
+
+    #[test]
+    fn recovery_hooks_expose_mobile_and_shadow_dom_content() {
+        let mobile = extract_with_diagnostics(
+            r#"
+            <html><head>
+                <style>@media (max-width: 600px) { .mobile-article { display: block; } }</style>
+            </head><body>
+                <article class="mobile-article" style="display: none">
+                    <p>This mobile article has enough text, punctuation, and detail to become readable after display recovery.</p>
+                </article>
+            </body></html>
+            "#,
+            None,
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap();
+        let mobile_article = mobile.article.unwrap();
+        assert!(mobile_article.text_content.contains("mobile article"));
+        assert!(mobile.diagnostics.attempts[0].recovery.mobile_rules_applied > 0);
+
+        let shadow = extract_with_diagnostics(
+            r#"
+            <html><body>
+                <x-story>
+                    <template shadowrootmode="open">
+                        <article><p>This shadow article has enough text and punctuation to become readable after flattening.</p></article>
+                    </template>
+                </x-story>
+            </body></html>
+            "#,
+            None,
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap();
+        let shadow_article = shadow.article.unwrap();
+        assert!(shadow_article.text_content.contains("shadow article"));
+        assert!(shadow.diagnostics.attempts[0].recovery.shadow_roots_flattened > 0);
     }
 
     #[test]

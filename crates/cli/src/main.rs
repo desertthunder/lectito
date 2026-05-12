@@ -45,6 +45,8 @@ struct ParseArgs {
     nb_top_candidates: usize,
     #[arg(long)]
     content_selector: Option<String>,
+    #[arg(long)]
+    mobile_viewport_width: Option<usize>,
     #[arg(long, value_enum)]
     diagnostic_format: Option<DiagnosticFormat>,
     #[arg(long)]
@@ -85,6 +87,7 @@ struct FixtureArgs {
 enum OutputFormat {
     Json,
     Html,
+    Markdown,
     Text,
 }
 
@@ -103,6 +106,7 @@ fn main() -> anyhow::Result<()> {
                 nb_top_candidates: args.nb_top_candidates,
                 char_threshold: args.char_threshold,
                 content_selector: args.content_selector,
+                mobile_viewport_width: args.mobile_viewport_width.or(Some(480)),
                 classes_to_preserve: args.classes_to_preserve,
                 keep_classes: args.keep_classes,
                 disable_json_ld: args.disable_json_ld,
@@ -168,6 +172,14 @@ fn print_diagnostics(diagnostics: &ExtractionDiagnostics, format: DiagnosticForm
                         root.selector,
                         root.text_len,
                         root.link_density
+                    );
+                }
+                if attempt.recovery.shadow_roots_flattened > 0 || attempt.recovery.mobile_rules_applied > 0 {
+                    eprintln!(
+                        "  {} shadow_roots={}, mobile_rules={}",
+                        "recovery:".bold(),
+                        attempt.recovery.shadow_roots_flattened,
+                        attempt.recovery.mobile_rules_applied
                     );
                 }
                 if !attempt.entry_points.is_empty() {
@@ -263,6 +275,11 @@ fn print_parse_output(article: Option<&Article>, format: OutputFormat, pretty: b
         OutputFormat::Html => {
             if let Some(article) = article {
                 println!("{}", article.content);
+            }
+        }
+        OutputFormat::Markdown => {
+            if let Some(article) = article {
+                println!("{}", article.markdown);
             }
         }
         OutputFormat::Text => {
