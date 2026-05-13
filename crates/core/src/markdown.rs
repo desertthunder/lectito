@@ -1,9 +1,9 @@
+mod tables;
+
+use comrak::{Arena, Options};
+use comrak::{escape_commonmark_inline, escape_commonmark_link_destination, format_commonmark, parse_document};
 use kuchiki::NodeRef;
 use kuchiki::traits::TendrilSink;
-
-use comrak::{
-    Arena, Options, escape_commonmark_inline, escape_commonmark_link_destination, format_commonmark, parse_document,
-};
 
 use super::{dom, patterns};
 
@@ -19,12 +19,12 @@ pub fn html_to_markdown(html: &str) -> String {
 }
 
 #[derive(Clone, Copy)]
-struct RenderContext {
+pub(super) struct RenderContext {
     in_pre: bool,
     list_depth: usize,
 }
 
-fn render_children(node: &NodeRef, ctx: RenderContext) -> String {
+pub(super) fn render_children(node: &NodeRef, ctx: RenderContext) -> String {
     let mut output = String::new();
     for child in node.children() {
         output.push_str(&render_node(&child, ctx));
@@ -93,6 +93,7 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
         "ul" => render_list(node, false, ctx),
         "ol" => render_list(node, true, ctx),
         "li" => block(inline_children(node, ctx)),
+        "table" => tables::render_table(node, ctx),
         "div" | "section" | "article" | "main" | "body" => render_children(node, ctx),
         "figure" => block(render_children(node, ctx)),
         "figcaption" => block(inline_children(node, ctx)),
@@ -138,7 +139,7 @@ fn block(value: String) -> String {
     if value.is_empty() { String::new() } else { format!("\n\n{value}\n\n") }
 }
 
-fn normalize_markdown(value: &str) -> String {
+pub(super) fn normalize_markdown(value: &str) -> String {
     let mut output = String::new();
     let mut blank_count = 0;
     for line in value.lines() {
@@ -159,7 +160,8 @@ fn normalize_markdown(value: &str) -> String {
 
 fn format_with_comrak(markdown: &str) -> String {
     let arena = Arena::new();
-    let options = Options::default();
+    let mut options = Options::default();
+    options.extension.table = true;
     let root = parse_document(&arena, markdown, &options);
     let mut output = String::new();
     if format_commonmark(root, &options, &mut output).is_err() {
@@ -182,5 +184,38 @@ mod tests {
         assert!(markdown.contains("Hello **bold** [link](https://example.com)."));
         assert!(markdown.contains("- One"));
         assert!(markdown.contains("    let x = 1;"));
+    }
+
+    #[test]
+    fn converts_simple_tables_to_pipe_tables() {
+        let markdown = html_to_markdown(
+            r#"<table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td>A</td><td>x|y</td></tr><tr><td>B</td><td><a href="https://example.com">z</a></td></tr></tbody></table>"#,
+        );
+
+        assert!(markdown.contains("| Name | Value |"));
+        assert!(markdown.contains("| --- | --- |"));
+        assert!(markdown.contains(r"| A | x\|y |"));
+        assert!(markdown.contains("| B | [z](https://example.com) |"));
+    }
+
+    #[test]
+    fn unwraps_layout_tables() {
+        let markdown = html_to_markdown(
+            r#"<table role="presentation"><tr><td><p>Left</p></td><td><p>Right <strong>side</strong></p></td></tr></table>"#,
+        );
+
+        assert!(!markdown.contains("| --- |"));
+        assert!(markdown.contains("Left"));
+        assert!(markdown.contains("Right **side**"));
+    }
+
+    #[test]
+    fn preserves_spanning_tables_as_html() {
+        let markdown =
+            html_to_markdown(r#"<table><tr><th colspan="2">Group</th></tr><tr><td>A</td><td>B</td></tr></table>"#);
+
+        assert!(markdown.contains("<table>"));
+        assert!(markdown.contains("colspan=\"2\""));
+        assert!(markdown.contains("<td>A</td>"));
     }
 }

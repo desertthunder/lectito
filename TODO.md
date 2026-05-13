@@ -4,14 +4,6 @@
 
 Context: our markdown conversion currently lives in `crates/core/src/markdown.rs`.
 
-### Preserve Table Structure
-
-- Add markdown conversion for simple `table` elements as pipe tables.
-- Escape pipe characters inside table cells.
-- Detect layout tables and unwrap their cell content instead of emitting malformed data tables.
-- Preserve complex tables with `rowspan` or `colspan` as cleaned HTML instead of flattening them.
-- Current gap: tables fall through to generic child rendering and can collapse to concatenated text such as `ABx|yz`.
-
 ### Convert Footnotes And Citations
 
 - Convert inline footnote references to `[^n]`.
