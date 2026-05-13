@@ -1,0 +1,91 @@
+*examples.txt*             Example URLs for extraction and manual smoke testing
+
+This file collects URLs that have historically exercised extraction,
+metadata, media, tables, code, math, footnotes, and cleanup behavior.
+Availability can change over time.
+
+===============================================================================
+CONTENTS                                               *examples-contents*
+
+1. Overview ........................................ |examples-overview|
+2. General Articles ................................ |examples-general|
+3. Technical References ............................ |examples-technical|
+4. News Pages ...................................... |examples-news|
+5. Community Pages ................................. |examples-community|
+6. Reference Pages ................................. |examples-reference|
+7. Edge Cases ...................................... |examples-edge-cases|
+
+===============================================================================
+1. Overview                                          *examples-overview*
+
+Use these URLs for ad hoc extractor runs and manual regression checks.
+The groups below are organized by page shape so failures are easier to
+triage when a specific content type regresses.
+
+================================================================================
+2. General Articles                                   *examples-general*
+
+https://stephango.com/saw
+https://mariozechner.at/posts/2026-03-25-thoughts-on-slowing-the-fuck-down/
+https://12gramsofcarbon.com/p/ilyas-30-papers-to-carmack-vlaes
+https://stripe.com/blog/online-migrations
+https://daringfireball.net/2026/05/software_as_the_product_of_obsession_times_voice
+https://hakibenita.com/sql-anomaly-detection
+https://dropbox.tech/infrastructure/asynchronous-task-scheduling-at-dropbox
+https://discord.com/blog/how-discord-stores-trillions-of-messages
+https://blog.nightly.mozilla.org/2026/04/27/vpn-split-view-and-other-goodies-these-weeks-in-firefox-issue-200/
+https://v8.dev/blog/json-stringify
+https://engineering.fb.com/2013/06/25/core-infra/tao-the-power-of-the-graph/
+
+================================================================================
+3. Technical References                                     *examples-technical*
+
+https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
+https://lean-lang.org/theorem_proving_in_lean4/dependent_type_theory.html
+https://docs.flutter.dev/app-architecture/guide
+https://www.rfc-editor.org/rfc/rfc7540
+https://sre.google/sre-book/table-of-contents/
+
+================================================================================
+4. News Pages                                                    *examples-news*
+
+https://www.bbc.com/news/magazine-32993891
+https://www.theguardian.com/environment/2019/jan/03/what-is-the-sea-telling-us-maori-tribes-fearful-over-whale-strandings
+https://texasstandard.org/stories/ut-austin-tailgate-tuesdays-lumin-church-burgers-atx/
+https://www.quantamagazine.org/hidden-heroines-of-chaos-ellen-fetter-and-margaret-hamilton-20190520/
+https://www.aclu.org/news/disability-rights/care-denied-west-virginias-ban-on-methadone-clinics-blocks-life-saving-medicine
+
+===============================================================================
+5. Community Pages                                         *examples-community*
+
+https://news.ycombinator.com/news
+https://www.lesswrong.com/posts/bx3gkHJehRCYZAF3r/pain-is-not-the-unit-of-effort
+https://substack.com/@richholmes/note/c-202380205
+https://x.com/arscontexta/status/2013045749580259680
+https://unthread.at/@desertthunder.dev/3mlgpk65xzw23
+
+===============================================================================
+6. Reference Pages                                          *examples-reference*
+
+https://en.wikipedia.org/wiki/Mozilla
+https://en.wikipedia.org/wiki/Hindley%E2%80%93Milner_type_system
+https://en.wikipedia.org/wiki/Neovim
+https://www.paulgraham.com/makersschedule.html
+https://scp-wiki.wikidot.com/scp-9935
+https://scp-wiki.wikidot.com/understanding-memetics
+
+===============================================================================
+7. Edge Cases                                              *examples-edge-cases*
+
+https://arxiv.org/html/2605.10907v1
+https://www.intmath.com/cg5/katex-mathjax-comparison.php
+https://maggieappleton.com/xanadu-patterns
+https://www.figma.com/blog/version-control-how-a-ux-writer-weighs-one-word-against-another/
+
+===============================================================================
+8. Sources                                              *examples-sources*
+
+Many of these examples are sourced directly from defuddle.md & mozilla's
+readability.js test corpus.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
