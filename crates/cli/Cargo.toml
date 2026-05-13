@@ -13,6 +13,6 @@ clap = { version = "4.5", features = ["derive"] }
 lectito-fixtures = { path = "../fixtures" }
 lectito-core = { path = "../core" }
 owo-colors = "4.2"
-reqwest = { version = "0.12", features = ["blocking", "native-tls"], default-features = false }
+reqwest = { version = "0.13.3", features = ["blocking"] }
 scraper.workspace = true
 serde_json = "1.0"
