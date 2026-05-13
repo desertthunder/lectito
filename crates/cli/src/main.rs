@@ -3,14 +3,21 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use lectito_core::{Article, ExtractionDiagnostics, ReadabilityOptions, ReadableOptions, extract};
 use lectito_core::{extract_with_diagnostics, is_probably_readable};
 use owo_colors::OwoColorize;
-use reqwest::{StatusCode, Url, blocking::Client, header::LOCATION, redirect::Policy};
+use reqwest::{
+    StatusCode, Url,
+    blocking::Client,
+    header::{ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL, HeaderMap, HeaderValue, LOCATION, REFERER},
+    redirect::Policy,
+};
 use scraper::{Html, Selector};
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
 };
 
-const USER_AGENT: &str = "curl/8.7.1 lectito/0.1";
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36";
+const CURL_USER_AGENT: &str = "curl/8.7.1";
 const MAX_REDIRECTS: usize = 10;
 
 #[derive(Debug, Parser)]
@@ -252,8 +259,31 @@ fn read_input(path: Option<&Path>, read_stdin: bool, url: Option<&str>) -> anyho
 }
 
 fn fetch_url(url: &str) -> anyhow::Result<InputDocument> {
+    fetch_url_with_profile(url, FetchProfile::Browser).or_else(|error| {
+        if is_retryable_fetch_error(&error) {
+            fetch_url_with_profile(url, FetchProfile::Curl).or_else(|curl_profile_error| {
+                if is_retryable_fetch_error(&curl_profile_error) {
+                    fetch_url_with_curl(url)
+                } else {
+                    Err(curl_profile_error)
+                }
+            })
+        } else {
+            Err(error)
+        }
+    })
+}
+
+#[derive(Clone, Copy)]
+enum FetchProfile {
+    Browser,
+    Curl,
+}
+
+fn fetch_url_with_profile(url: &str, profile: FetchProfile) -> anyhow::Result<InputDocument> {
     let client = Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(profile.user_agent())
+        .default_headers(profile.headers())
         .redirect(Policy::none())
         .build()
         .with_context(|| format!("failed to build HTTP client for {url}"))?;
@@ -304,6 +334,74 @@ fn fetch_url(url: &str) -> anyhow::Result<InputDocument> {
     }
 
     unreachable!("redirect loop exits by returning a response or bailing at the redirect limit")
+}
+
+impl FetchProfile {
+    fn user_agent(self) -> &'static str {
+        match self {
+            Self::Browser => USER_AGENT,
+            Self::Curl => CURL_USER_AGENT,
+        }
+    }
+
+    fn headers(self) -> HeaderMap {
+        match self {
+            Self::Browser => browser_headers(),
+            Self::Curl => curl_headers(),
+        }
+    }
+}
+
+fn browser_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(REFERER, HeaderValue::from_static("https://www.google.com/"));
+    headers
+}
+
+fn curl_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+    headers
+}
+
+fn is_retryable_fetch_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:?}");
+    message.contains("403 Forbidden") || message.contains("429 Too Many Requests")
+}
+
+fn fetch_url_with_curl(url: &str) -> anyhow::Result<InputDocument> {
+    let marker = "\nLECTITO_EFFECTIVE_URL:";
+    let output = ProcessCommand::new("curl")
+        .args([
+            "-sS",
+            "-L",
+            "--fail",
+            "--compressed",
+            "-A",
+            CURL_USER_AGENT,
+            "-w",
+            &format!("{marker}%{{url_effective}}"),
+            url,
+        ])
+        .output()
+        .with_context(|| format!("failed to run curl fallback for {url}"))?;
+
+    if !output.status.success() {
+        anyhow::bail!("curl fallback failed for {url} with status {}", output.status);
+    }
+
+    let output = String::from_utf8(output.stdout).context("curl fallback returned non-UTF-8 body")?;
+    let Some((html, effective_url)) = output.rsplit_once(marker) else {
+        anyhow::bail!("curl fallback output did not include final URL for {url}");
+    };
+
+    Ok(InputDocument { html: html.to_string(), base_url: Some(effective_url.trim().to_string()) })
 }
 
 fn is_redirect(status: StatusCode) -> bool {

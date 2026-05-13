@@ -4,21 +4,6 @@
 
 Context: our markdown conversion currently lives in `crates/core/src/markdown.rs`.
 
-### Convert Footnotes And Citations
-
-- Convert inline footnote references to `[^n]`.
-- Emit footnote definitions at the end of markdown.
-- Remove backlink-only anchors from footnote bodies.
-- Support common variants: `fnref:`, MediaWiki cite refs, Google Docs/Word-style footnotes, loose footnote sections, and sidenotes where practical.
-- Current gap: footnote refs render as ordinary links/text, for example `See[1](#fn:1)`.
-
-### Preserve Math
-
-- Convert MathML, KaTeX, and MediaWiki math forms to inline `$...$` or block `$$...$$` markdown.
-- Extract LaTeX from `data-latex`, `alttext`, and KaTeX annotations.
-- Handle equation tables without flattening equation content.
-- Current gap: math nodes generally collapse to plain text or disappear.
-
 ### Improve Code Block Normalization
 
 - Preserve fenced-code language identifiers from `data-lang`, `data-language`, `language-*`, and common highlighter classes.

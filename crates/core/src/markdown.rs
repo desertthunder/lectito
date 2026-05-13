@@ -1,3 +1,5 @@
+mod footnotes;
+mod math;
 mod tables;
 
 use comrak::{Arena, Options};
@@ -13,7 +15,9 @@ pub fn html_to_markdown(html: &str) -> String {
         .into_iter()
         .next()
         .unwrap_or(document);
+    let footnotes = footnotes::FootnoteContext::extract(&body);
     let mut output = render_children(&body, RenderContext { in_pre: false, list_depth: 0 });
+    output.push_str(&footnotes.render_definitions());
     output = normalize_markdown(&output);
     format_with_comrak(&output)
 }
@@ -58,6 +62,9 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
             let code = render_children(node, RenderContext { in_pre: true, ..ctx });
             format!("\n\n```\n{}\n```\n\n", code.trim_matches('\n'))
         }
+        "math" | "mjx-container" => math::render_math(node, ctx).unwrap_or_else(|| render_children(node, ctx)),
+        "script" => math::render_math(node, ctx).unwrap_or_default(),
+        "span" | "img" if math::render_math(node, ctx).is_some() => math::render_math(node, ctx).unwrap_or_default(),
         "a" => {
             let label = inline_children(node, ctx);
             if label.is_empty() {
@@ -161,7 +168,10 @@ pub(super) fn normalize_markdown(value: &str) -> String {
 fn format_with_comrak(markdown: &str) -> String {
     let arena = Arena::new();
     let mut options = Options::default();
+    options.extension.footnotes = true;
+    options.extension.math_dollars = true;
     options.extension.table = true;
+    options.parse.leave_footnote_definitions = true;
     let root = parse_document(&arena, markdown, &options);
     let mut output = String::new();
     if format_commonmark(root, &options, &mut output).is_err() {
@@ -217,5 +227,70 @@ mod tests {
         assert!(markdown.contains("<table>"));
         assert!(markdown.contains("colspan=\"2\""));
         assert!(markdown.contains("<td>A</td>"));
+    }
+
+    #[test]
+    fn converts_numeric_footnotes() {
+        let markdown = html_to_markdown(
+            r##"<p>See<sup><a id="fnref:1" href="#fn:1">1</a></sup>.</p><ol><li id="fn:1">A note <a href="#fnref:1">↩</a></li></ol>"##,
+        );
+
+        assert!(markdown.contains("See[^1]."), "{markdown}");
+        assert!(markdown.contains("[^1]:\n    A note"), "{markdown}");
+        assert!(!markdown.contains("↩"), "{markdown}");
+        assert!(!markdown.contains("[1](#fn:1)"), "{markdown}");
+    }
+
+    #[test]
+    fn converts_mediawiki_citations() {
+        let markdown = html_to_markdown(
+            r##"<p>Claim<sup class="reference"><a href="#cite_note-smith-2">[2]</a></sup>.</p><ol class="references"><li id="cite_note-smith-2"><span class="mw-cite-backlink"><a href="#cite_ref-smith-2">^</a></span>Smith source</li></ol>"##,
+        );
+
+        assert!(markdown.contains("Claim[^2]."), "{markdown}");
+        assert!(markdown.contains("[^2]:\n    Smith source"), "{markdown}");
+        assert!(!markdown.contains("cite_note"), "{markdown}");
+    }
+
+    #[test]
+    fn converts_google_docs_footnotes() {
+        let markdown = html_to_markdown(
+            r##"<p>Word<a id="ftnt_ref1" href="#ftnt1">[1]</a></p><div id="ftnt1"><p><a href="#ftnt_ref1">[1]</a> Google Docs note.</p></div>"##,
+        );
+
+        assert!(markdown.contains("Word[^1]"), "{markdown}");
+        assert!(markdown.contains("[^1]:\n    Google Docs note."), "{markdown}");
+        assert!(!markdown.contains("ftnt_ref1"), "{markdown}");
+    }
+
+    #[test]
+    fn converts_mathml_to_latex() {
+        let markdown = html_to_markdown(
+            r#"<p>When <math><mi>a</mi><mo>≠</mo><mn>0</mn></math>, solve <math display="block"><mi>x</mi><mo>=</mo><mfrac><mrow><mo>−</mo><mi>b</mi></mrow><mrow><mn>2</mn><mi>a</mi></mrow></mfrac></math></p>"#,
+        );
+
+        assert!(markdown.contains("When $a \\ne 0$"), "{markdown}");
+        assert!(markdown.contains("$$\nx = \\frac{- b}{2 a}\n$$"), "{markdown}");
+    }
+
+    #[test]
+    fn extracts_katex_annotations_and_latex_attrs() {
+        let markdown = html_to_markdown(
+            r#"<p><span class="katex"><span class="katex-mathml"><math><semantics><mrow></mrow><annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math></span></span> and <span data-latex="\alpha+\beta"></span></p>"#,
+        );
+
+        assert!(markdown.contains("$E=mc^2$"), "{markdown}");
+        assert!(markdown.contains("$\\alpha+\\beta$"), "{markdown}");
+    }
+
+    #[test]
+    fn unwraps_equation_tables_without_flattening_math() {
+        let markdown = html_to_markdown(
+            r#"<table><tr><td><math display="block"><mi>y</mi><mo>=</mo><msup><mi>x</mi><mn>2</mn></msup></math></td></tr></table>"#,
+        );
+
+        assert!(markdown.contains("$$\ny = x^{2}\n$$"), "{markdown}");
+        assert!(!markdown.contains("| --- |"), "{markdown}");
+        assert!(!markdown.contains("<table>"), "{markdown}");
     }
 }

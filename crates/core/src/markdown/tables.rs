@@ -1,6 +1,6 @@
 use kuchiki::NodeRef;
 
-use super::{RenderContext, normalize_markdown, render_children};
+use super::{RenderContext, math, normalize_markdown, render_children};
 use crate::{dom, patterns, serialize};
 
 pub(super) fn render_table(node: &NodeRef, ctx: RenderContext) -> String {
@@ -9,7 +9,7 @@ pub(super) fn render_table(node: &NodeRef, ctx: RenderContext) -> String {
         return String::new();
     }
 
-    if has_spanning_cell(node) {
+    if has_spanning_cell(node) && !math::has_math(node) {
         return raw_html_table(node);
     }
 
@@ -130,7 +130,14 @@ fn is_layout_table(node: &NodeRef, rows: &[Vec<String>]) -> bool {
         return true;
     }
 
-    has_layout_cell_content(node) && row_count.saturating_mul(column_count) < 10
+    (math::has_math(node) && !has_data_density(rows))
+        || (has_layout_cell_content(node) && row_count.saturating_mul(column_count) < 10)
+}
+
+fn has_data_density(rows: &[Vec<String>]) -> bool {
+    let row_count = rows.len();
+    let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    row_count >= 2 && column_count >= 2 && row_count.saturating_mul(column_count) >= 10
 }
 
 fn has_layout_cell_content(node: &NodeRef) -> bool {

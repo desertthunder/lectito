@@ -78,6 +78,9 @@ https://scp-wiki.wikidot.com/understanding-memetics
 7. Edge Cases                                              *examples-edge-cases*
 
 https://arxiv.org/html/2605.10907v1
+https://mathjax.github.io/MathJax-demos-web/input/tex-mml2chtml.html
+https://math.meta.stackexchange.com/questions/5020/mathjax-basic-tutorial-and-quick-reference
+https://stackprinter.appspot.com/export?question=5020&service=math.meta.stackexchange&language=en&hideAnswers=false&width=640
 https://www.intmath.com/cg5/katex-mathjax-comparison.php
 https://maggieappleton.com/xanadu-patterns
 https://www.figma.com/blog/version-control-how-a-ux-writer-weighs-one-word-against-another/
