@@ -1,5 +1,6 @@
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use lectito_core::markdown_with_toml_frontmatter;
 use lectito_core::{Article, ExtractionDiagnostics, ReadabilityOptions, ReadableOptions, extract};
 use lectito_core::{extract_with_diagnostics, is_probably_readable};
 use owo_colors::OwoColorize;
@@ -125,7 +126,12 @@ fn main() -> anyhow::Result<()> {
                 link_density_modifier: 0.0,
             };
             let report = extract_with_diagnostics(&input.html, input.base_url.as_deref(), &options)?;
-            print_parse_output(report.article.as_ref(), args.format, args.pretty)?;
+            print_parse_output(
+                report.article.as_ref(),
+                args.format,
+                args.pretty,
+                input.base_url.as_deref(),
+            )?;
             if let Some(format) = args.diagnostic_format {
                 io::stdout().flush().context("failed to flush parse output")?;
                 print_diagnostics(&report.diagnostics, format)?;
@@ -485,7 +491,9 @@ fn link_redirect_target(document: &Html) -> Option<String> {
         .find_map(|node| node.value().attr("href").map(str::to_string))
 }
 
-fn print_parse_output(article: Option<&Article>, format: OutputFormat, pretty: bool) -> anyhow::Result<()> {
+fn print_parse_output(
+    article: Option<&Article>, format: OutputFormat, pretty: bool, source: Option<&str>,
+) -> anyhow::Result<()> {
     match format {
         OutputFormat::Json => {
             if pretty {
@@ -507,7 +515,10 @@ fn print_parse_output(article: Option<&Article>, format: OutputFormat, pretty: b
         }
         OutputFormat::Markdown => {
             if let Some(article) = article {
-                println!("{}", article.markdown);
+                println!(
+                    "{}",
+                    markdown_with_toml_frontmatter(article, source).context("failed to serialize TOML frontmatter")?
+                );
             }
         }
         OutputFormat::Text => {

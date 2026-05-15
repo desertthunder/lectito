@@ -21,5 +21,5 @@ pub use diagnostics::{
 };
 pub use error::Error;
 pub use extract::{extract, extract_with_diagnostics};
-pub use markdown::html_to_markdown;
+pub use markdown::{html_to_markdown, markdown_with_toml_frontmatter};
 pub use readable::is_probably_readable;

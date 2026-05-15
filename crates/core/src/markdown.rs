@@ -1,7 +1,10 @@
 pub(crate) mod code;
 mod footnotes;
+mod frontmatter;
 mod math;
 mod tables;
+
+pub use frontmatter::markdown_with_toml_frontmatter;
 
 use comrak::{Arena, Options};
 use comrak::{escape_commonmark_inline, escape_commonmark_link_destination, format_commonmark, parse_document};
