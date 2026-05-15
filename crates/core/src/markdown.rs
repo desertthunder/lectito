@@ -1,3 +1,4 @@
+pub(crate) mod code;
 mod footnotes;
 mod math;
 mod tables;
@@ -45,6 +46,10 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
         return patterns::normalize_spaces(&text);
     }
 
+    if code::is_highlighter_chrome(node) {
+        return String::new();
+    }
+
     let tag = dom::node_name(node);
     match tag.as_str() {
         "h1" => block(format!("# {}", inline_children(node, ctx))),
@@ -58,10 +63,7 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
         "strong" | "b" => format!("**{}**", inline_children(node, ctx)),
         "em" | "i" => format!("*{}*", inline_children(node, ctx)),
         "code" if !ctx.in_pre => format!("`{}`", inline_children(node, ctx).replace('`', "\\`")),
-        "pre" => {
-            let code = render_children(node, RenderContext { in_pre: true, ..ctx });
-            format!("\n\n```\n{}\n```\n\n", code.trim_matches('\n'))
-        }
+        "pre" => code::render_code_block(node, ctx),
         "math" | "mjx-container" => math::render_math(node, ctx).unwrap_or_else(|| render_children(node, ctx)),
         "script" => math::render_math(node, ctx).unwrap_or_default(),
         "span" | "img" if math::render_math(node, ctx).is_some() => math::render_math(node, ctx).unwrap_or_default(),
@@ -100,8 +102,9 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
         "ul" => render_list(node, false, ctx),
         "ol" => render_list(node, true, ctx),
         "li" => block(inline_children(node, ctx)),
-        "table" => tables::render_table(node, ctx),
-        "div" | "section" | "article" | "main" | "body" => render_children(node, ctx),
+        "table" => code::render_code_table(node, ctx).unwrap_or_else(|| tables::render_table(node, ctx)),
+        "div" => code::render_code_container(node, ctx).unwrap_or_else(|| render_children(node, ctx)),
+        "section" | "article" | "main" | "body" => render_children(node, ctx),
         "figure" => block(render_children(node, ctx)),
         "figcaption" => block(inline_children(node, ctx)),
         "hr" => "\n\n---\n\n".to_string(),
@@ -149,8 +152,21 @@ fn block(value: String) -> String {
 pub(super) fn normalize_markdown(value: &str) -> String {
     let mut output = String::new();
     let mut blank_count = 0;
+    let mut in_fenced_code = false;
     for line in value.lines() {
         let line = line.trim_end();
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            blank_count = 0;
+            in_fenced_code = !in_fenced_code;
+            output.push_str(line.trim_start());
+            output.push('\n');
+            continue;
+        }
+        if in_fenced_code {
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        }
         if line.trim().is_empty() {
             blank_count += 1;
             if blank_count <= 1 {

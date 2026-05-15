@@ -1,0 +1,9 @@
+{
+  "title": "CodeMirror code block normalization",
+  "byline": null,
+  "dir": null,
+  "excerpt": "This fixture covers editor-shaped code markup, where each visible source line is represented by a CodeMirror line container instead of a native pre element. Markdown conversion should join those visual lines into a single typed fenced code block.",
+  "siteName": null,
+  "publishedTime": null,
+  "readerable": true
+}

@@ -1,0 +1,9 @@
+{
+  "title": "Mintlify code block normalization",
+  "byline": null,
+  "dir": null,
+  "excerpt": "This fixture represents documentation pages that wrap highlighted code with copy controls, filename chrome, language labels, and line numbers. The extractor should keep the article prose and the code sample while markdown conversion removes the surrounding interface text.",
+  "siteName": null,
+  "publishedTime": null,
+  "readerable": true
+}

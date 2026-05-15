@@ -4,12 +4,12 @@ use regex::Regex;
 use url::Url;
 
 use super::config::{ExtractFlags, ReadabilityOptions};
-use super::dom;
 use super::patterns::{
     AD_OR_LOADING_WORDS, COMMA, DEFAULT_CLASSES_TO_PRESERVE, DEPRECATED_SIZE_ATTRIBUTE_ELEMS,
     PRESENTATIONAL_ATTRIBUTES, SHARE_ELEMENTS,
 };
 use super::scoring::{class_weight, link_density};
+use super::{dom, markdown};
 
 static LAZY_IMAGE_URL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^\s*\S+\.(jpg|jpeg|png|webp)(\?\S*)?\s*$").expect("valid image url regex"));
@@ -32,6 +32,7 @@ pub(crate) fn cleanup_article(
         clean_embeds(node);
         remove_share_nodes(node);
         clean_headers(node, article_title, flags);
+        markdown::code::normalize_code_markup(node);
         if flags.clean_conditionally {
             clean_conditionally(node, options, flags);
         }

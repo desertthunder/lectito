@@ -84,6 +84,10 @@ https://stackprinter.appspot.com/export?question=5020&service=math.meta.stackexc
 https://www.intmath.com/cg5/katex-mathjax-comparison.php
 https://maggieappleton.com/xanadu-patterns
 https://www.figma.com/blog/version-control-how-a-ux-writer-weighs-one-word-against-another/
+https://www.mintlify.com/docs/create/code
+https://mintlify.com/docs/code
+https://codemirror.net/examples/basic/
+https://prismjs.com/examples.html
 
 ===============================================================================
 8. Sources                                              *examples-sources*

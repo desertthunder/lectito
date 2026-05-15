@@ -4,13 +4,6 @@
 
 Context: our markdown conversion currently lives in `crates/core/src/markdown.rs`.
 
-### Improve Code Block Normalization
-
-- Preserve fenced-code language identifiers from `data-lang`, `data-language`, `language-*`, and common highlighter classes.
-- Strip copy buttons, toolbars, line numbers, gutter cells, and syntax-highlighter UI chrome.
-- Normalize common code block shapes used by Prism, Pygments, Rouge, Chroma, React Syntax Highlighter, CodeMirror, WordPress, Mintlify, and Writerside where feasible.
-- Current gap: code blocks emit untyped fences and can include highlighter noise.
-
 ### Improve Image And Media Markdown
 
 - Prefer the best image candidate from `srcset`, including URLs with commas in CDN paths.
@@ -46,5 +39,3 @@ Context: our markdown conversion currently lives in `crates/core/src/markdown.rs
   - `math--mathjax-svg`
   - `footnotes--numeric-anchor-id`
   - `footnotes--google-docs-ftnt`
-  - `codeblocks--mintlify`
-  - `codeblocks--chatgpt-codemirror`

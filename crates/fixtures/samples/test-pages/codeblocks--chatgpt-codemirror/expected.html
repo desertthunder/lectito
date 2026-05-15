@@ -1,0 +1,19 @@
+<div id="readability-page-1" class="page"><article>
+      
+      <p>
+        This fixture covers editor-shaped code markup, where each visible source
+        line is represented by a CodeMirror line container instead of a native
+        pre element. Markdown conversion should join those visual lines into a
+        single typed fenced code block.
+      </p>
+      <div>
+        
+        <pre data-language="python"><code data-language="python">def clean_html(source):
+    return extractor.clean(source)</code></pre>
+      </div>
+      <p>
+        The surrounding article text makes this a realistic extraction target
+        and ensures CodeMirror gutters are ignored rather than leaking line
+        numbers into the markdown output.
+      </p>
+    </article></div>

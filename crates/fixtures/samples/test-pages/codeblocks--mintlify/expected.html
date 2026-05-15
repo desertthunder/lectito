@@ -1,0 +1,21 @@
+<div id="readability-page-1" class="page"><article>
+    
+    <p>
+      This fixture represents documentation pages that wrap highlighted code with
+      copy controls, filename chrome, language labels, and line numbers. The
+      extractor should keep the article prose and the code sample while markdown
+      conversion removes the surrounding interface text.
+    </p>
+    <div>
+      
+      <pre data-language="typescript"><code data-language="typescript">export async function loadArticle(url: string) {
+  return client.extract({ url });
+}</code></pre>
+    </div>
+    <p>
+      The paragraph after the code block gives the readability scorer enough
+      natural language context to select the article rather than the navigation
+      or code toolbar. It also verifies that prose after a code sample remains
+      in the extracted content.
+    </p>
+  </article></div>
