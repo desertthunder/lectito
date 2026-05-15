@@ -208,7 +208,7 @@ pub fn html_redirect_target(html: &str, current_url: &Url) -> Option<Url> {
         .unwrap_or(false);
     let text = document.root_element().text().collect::<String>().to_lowercase();
 
-    if title_is_redirect || text.contains("redirected") || text.contains("redirecting") {
+    if !(title_is_redirect || text.contains("redirected") || text.contains("redirecting")) {
         return None;
     }
 

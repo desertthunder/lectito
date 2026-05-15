@@ -1,5 +1,38 @@
 # To-Dos
 
+## Extraction Quality
+
+Context: current extraction is strong for many article pages, but the remaining
+edge cases usually fall into wrong-root selection, over-included chrome, or
+metadata/header cleanup.
+
+### Retry Short Or Suspicious Extractions
+
+- If extracted text is far below the page's best content signals, retry with relaxed removal settings.
+- Retry without unlikely-candidate stripping when the first result is under a useful word threshold.
+- Retry with hidden-element removal disabled when the first result is extremely short.
+- Prefer a larger focused subtree when the current result is only notes, metadata, or a single step.
+
+### Remove Trailing Page Chrome
+
+- Strip comment sections after the article body.
+- Strip related links, sponsor blocks, job widgets, mortgage/finance widgets, and partner offers after the body.
+- Remove trailing newsletter/signup blocks unless they are inside the article content itself.
+- Stop cleanup at footnotes/references so legitimate notes are preserved.
+
+### Improve Metadata And Header Cleanup
+
+- Separate title, author, date, and hero/header blocks from the article body before markdown conversion.
+- Avoid using site names as titles when a more specific article headline is available.
+- Improve byline extraction when author cards, avatars, and timestamps are adjacent to the first paragraph.
+- Use schema.org fields as a fallback for title, author, description, published time, and article body.
+
+### Clean Reference Site Chrome
+
+- Remove skip links, "from Wikipedia" boilerplate, edit links, table-of-contents blocks, and infoboxes when extracting reference pages.
+- Preserve equations, tables, footnotes, and citation references while removing navigation chrome.
+- Remove heading permalink/edit anchors but keep the heading text.
+
 ## Markdown Conversion
 
 Context: our markdown conversion currently lives in `crates/core/src/markdown.rs`.
