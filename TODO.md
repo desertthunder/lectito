@@ -13,13 +13,6 @@ metadata/header cleanup.
 - Retry with hidden-element removal disabled when the first result is extremely short.
 - Prefer a larger focused subtree when the current result is only notes, metadata, or a single step.
 
-### Remove Trailing Page Chrome
-
-- Strip comment sections after the article body.
-- Strip related links, sponsor blocks, job widgets, mortgage/finance widgets, and partner offers after the body.
-- Remove trailing newsletter/signup blocks unless they are inside the article content itself.
-- Stop cleanup at footnotes/references so legitimate notes are preserved.
-
 ### Improve Metadata And Header Cleanup
 
 - Separate title, author, date, and hero/header blocks from the article body before markdown conversion.

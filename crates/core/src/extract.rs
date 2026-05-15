@@ -439,6 +439,7 @@ pub(crate) fn serialize_roots(
 
     cleanup::cleanup_article(&roots, opts, flags, base_url, title);
     normalize::normalize_article(&roots, title);
+    let roots = cleanup::remove_trailing_chrome_roots(roots);
 
     let mut content = String::from(r#"<div id="readability-page-1" class="page">"#);
     for node in &roots {
@@ -791,6 +792,124 @@ mod tests {
         assert!(article.content.contains("<pre><code>let value = 1;</code></pre>"));
         assert!(article.markdown.contains("## Code Samples"));
         assert!(article.markdown.contains("    let value = 1;"));
+    }
+
+    #[test]
+    fn removes_trailing_page_chrome_after_article_body() {
+        let article = extract(
+            r#"
+            <html><head><title>Cleanup Story</title></head><body>
+                <main>
+                    <article>
+                        <h1>Cleanup Story</h1>
+                        <p>This article opens with enough detail, punctuation, and concrete prose to be selected as readable content.</p>
+                        <p>This article continues with a second paragraph, so the following blocks are trailing page chrome.</p>
+                        <section class="related-articles">
+                            <h2>Related articles</h2>
+                            <ul>
+                                <li><a href="/a">One related link</a></li>
+                                <li><a href="/b">Two related link</a></li>
+                                <li><a href="/c">Three related link</a></li>
+                            </ul>
+                        </section>
+                        <section id="comments">
+                            <h2>Comments</h2>
+                            <p>Join the discussion below.</p>
+                        </section>
+                    </article>
+                </main>
+            </body></html>
+            "#,
+            Some("https://example.com/cleanup"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(
+            article
+                .text_content
+                .contains("following blocks are trailing page chrome")
+        );
+        assert!(!article.text_content.contains("Related articles"));
+        assert!(!article.text_content.contains("Join the discussion"));
+    }
+
+    #[test]
+    fn preserves_footnotes_while_removing_chrome_after_them() {
+        let article = extract(
+            r##"
+            <html><head><title>Notes Story</title></head><body>
+                <article>
+                    <h1>Notes Story</h1>
+                    <p>This article has enough substance, punctuation, and references to keep the body readable.<sup><a href="#fn1">1</a></sup></p>
+                    <section class="footnotes">
+                        <h2>Footnotes</h2>
+                        <ol>
+                            <li id="fn1">A legitimate note that should remain attached to the article.</li>
+                        </ol>
+                    </section>
+                    <aside class="partner-offer">
+                        <h2>Partner offers</h2>
+                        <a href="/deal">Mortgage offer</a>
+                        <a href="/card">Finance widget</a>
+                        <a href="/jobs">Jobs widget</a>
+                    </aside>
+                </article>
+            </body></html>
+            "##,
+            Some("https://example.com/notes"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(article.text_content.contains("legitimate note"));
+        assert!(!article.text_content.contains("Partner offers"));
+        assert!(!article.text_content.contains("Mortgage offer"));
+    }
+
+    #[test]
+    fn removes_newsletter_category_and_next_article_tail_sections() {
+        let article = extract(
+            r#"
+            <html><head><title>Article Tail</title></head><body>
+                <div id="postContent">
+                    <div id="postBody">
+                        <section>
+                            <p>This article body is long enough, punctuated enough, and concrete enough to be selected from a nested article page.</p>
+                            <p>The final paragraph should remain as the end of the article.</p>
+                        </section>
+                        <section id="newsletter">
+                            <div>The Daily Newsletter</div>
+                            <p><em>Get highlights of the most important news delivered to your email inbox</em></p>
+                        </section>
+                        <section>
+                            <div><h2>Also in <span>Physics</span></h2></div>
+                        </section>
+                        <div>
+                            <section>
+                                <div>
+                                    <h2>Next article</h2>
+                                    <div>Solution: A puzzle teaser</div>
+                                </div>
+                            </section>
+                            <a href="/next"></a>
+                        </div>
+                    </div>
+                </div>
+            </body></html>
+            "#,
+            Some("https://example.com/story"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(article.text_content.contains("final paragraph should remain"));
+        assert!(!article.text_content.contains("The Daily Newsletter"));
+        assert!(!article.text_content.contains("Also in Physics"));
+        assert!(!article.text_content.contains("Next article"));
     }
 
     #[test]

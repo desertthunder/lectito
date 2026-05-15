@@ -17,6 +17,39 @@ static LAZY_IMAGE_URL: Lazy<Regex> =
 static LAZY_IMAGE_SRCSET: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\.(jpg|jpeg|png|webp)\S*\s+\d").expect("valid image srcset regex"));
 
+static TRAILING_CHROME_ATTRS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?ix)
+        \b(
+            after[-_]?post|bottom[-_]?of[-_]?article|comment(s|ary)?|comment[-_]?thread|court[-_]?case|
+            discussion|disqus|finance|follow[-_]?up|job(s)?|keep[-_]?reading|
+            mortgage|most[-_]?popular|most[-_]?read|most[-_]?viewed|newsletter|next[-_]?article|next[-_]?up|
+            onward[-_]?journey|outbrain|partner[-_]?offer|popular|promo|
+            read[-_]?also|read[-_]?more|read[-_]?next|recommend(ed|ation|ations)?|
+            recirc|related|signup|sign[-_]?up|sponsor(ed)?|subscribe|
+            subscription|taboola|widget|yarpp
+        )\b",
+    )
+    .expect("valid trailing chrome attribute regex")
+});
+
+static TRAILING_CHROME_TEXT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)^\s*(comments?|join the (conversation|discussion)|related( articles| posts| stories)?|also in\b|court case:|affiliate:|explore press release|more (from|in|on)|recommended|most (popular|read|viewed)|next article|read (also|more|next)|sponsored|partner offers?|(the )?\w*\s*newsletter|sign up|subscribe|jobs?|mortgage|finance)",
+    )
+    .expect("valid trailing chrome text regex")
+});
+
+static FOOTNOTE_REFERENCE_ATTRS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(footnotes?|endnotes?|references?|bibliography|citations?)\b")
+        .expect("valid footnote reference attribute regex")
+});
+
+static FOOTNOTE_REFERENCE_TEXT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^\s*(footnotes?|notes|references|bibliography|citations?)\s*$")
+        .expect("valid footnote reference text regex")
+});
+
 pub(crate) fn cleanup_article(
     nodes: &[NodeRef], options: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>,
     article_title: Option<&str>,
@@ -31,6 +64,7 @@ pub(crate) fn cleanup_article(
         );
         clean_embeds(node);
         remove_share_nodes(node);
+        remove_trailing_page_chrome(node);
         clean_headers(node, article_title, flags);
         markdown::code::normalize_code_markup(node);
         if flags.clean_conditionally {
@@ -42,6 +76,24 @@ pub(crate) fn cleanup_article(
             clean_classes(node, options);
         }
     }
+}
+
+pub(crate) fn remove_trailing_chrome_roots(roots: Vec<NodeRef>) -> Vec<NodeRef> {
+    let mut retained = Vec::with_capacity(roots.len());
+    let mut trimming = true;
+
+    for root in roots.into_iter().rev() {
+        if trimming && is_trailing_page_chrome(&root) {
+            continue;
+        }
+        if is_footnote_or_reference_block(&root) || has_meaningful_article_content(&root) {
+            trimming = false;
+        }
+        retained.push(root);
+    }
+
+    retained.reverse();
+    retained
 }
 
 fn clean_unsafe_attrs(node: &NodeRef) {
@@ -148,6 +200,121 @@ fn remove_share_nodes(root: &NodeRef) {
             node.detach();
         }
     }
+}
+
+fn remove_trailing_page_chrome(root: &NodeRef) {
+    let mut trimming = true;
+    for child in root
+        .children()
+        .filter(|node| node.as_element().is_some())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        if !trimming {
+            break;
+        }
+        if is_trailing_page_chrome(&child) {
+            child.detach();
+        } else if is_footnote_or_reference_block(&child) || has_meaningful_article_content(&child) {
+            trimming = false;
+        }
+    }
+
+    for child in root.children().filter(|node| node.as_element().is_some()) {
+        if !is_footnote_or_reference_block(&child) {
+            remove_trailing_page_chrome(&child);
+        }
+    }
+}
+
+fn is_trailing_page_chrome(node: &NodeRef) -> bool {
+    if is_footnote_or_reference_block(node) {
+        return false;
+    }
+
+    let tag = dom::node_name(node);
+    if matches!(tag.as_str(), "aside" | "footer" | "form" | "nav") {
+        return true;
+    }
+
+    let attrs = trailing_signal_attrs(node);
+    if TRAILING_CHROME_ATTRS.is_match(&attrs) {
+        return true;
+    }
+
+    let text = dom::inner_text(node);
+    let text_len = text.chars().count();
+    if text_len == 0 {
+        return false;
+    }
+    if text_len < 500 && text.to_ascii_lowercase().contains("explore press release") {
+        return true;
+    }
+    if text_len < 800 && TRAILING_CHROME_TEXT.is_match(&text) {
+        return true;
+    }
+
+    let link_count = dom::select_nodes(node, "a").len();
+    if link_count >= 3 && link_density(node) > 0.45 && text_len < 1500 {
+        return true;
+    }
+
+    let input_count = dom::select_nodes(node, "input, button, select, textarea").len();
+    input_count > 0 && text_len < 700 && looks_like_signup_text(&text)
+}
+
+fn is_footnote_or_reference_block(node: &NodeRef) -> bool {
+    let attrs = trailing_signal_attrs(node);
+    if FOOTNOTE_REFERENCE_ATTRS.is_match(&attrs) {
+        return true;
+    }
+
+    if dom::attr(node, "role")
+        .is_some_and(|role| matches!(role.to_ascii_lowercase().as_str(), "doc-footnotes" | "doc-endnotes"))
+    {
+        return true;
+    }
+
+    dom::select_nodes(node, "h1, h2, h3, h4, h5, h6")
+        .first()
+        .is_some_and(|heading| FOOTNOTE_REFERENCE_TEXT.is_match(&dom::inner_text(heading)))
+}
+
+fn has_meaningful_article_content(node: &NodeRef) -> bool {
+    let tag = dom::node_name(node);
+    if matches!(tag.as_str(), "p" | "pre" | "blockquote" | "table" | "figure") {
+        return !dom::inner_text(node).is_empty() || !dom::select_nodes(node, "img, picture, video, audio").is_empty();
+    }
+
+    let text = dom::inner_text(node);
+    if text.chars().count() >= 80 && link_density(node) < 0.5 {
+        return true;
+    }
+
+    !dom::select_nodes(node, "p, pre, blockquote, table, figure, img, picture, video, audio").is_empty()
+}
+
+fn trailing_signal_attrs(node: &NodeRef) -> String {
+    let attrs = dom::attrs(node);
+    [
+        attrs.get("class").map(String::as_str).unwrap_or_default(),
+        attrs.get("id").map(String::as_str).unwrap_or_default(),
+        attrs.get("role").map(String::as_str).unwrap_or_default(),
+        attrs.get("data-component").map(String::as_str).unwrap_or_default(),
+        attrs.get("data-testid").map(String::as_str).unwrap_or_default(),
+        attrs.get("data-test").map(String::as_str).unwrap_or_default(),
+        attrs.get("aria-label").map(String::as_str).unwrap_or_default(),
+    ]
+    .join(" ")
+    .to_ascii_lowercase()
+}
+
+fn looks_like_signup_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["newsletter", "sign up", "signup", "subscribe", "email", "offer"]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 fn clean_headers(root: &NodeRef, article_title: Option<&str>, flags: ExtractFlags) {

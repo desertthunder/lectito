@@ -1,0 +1,9 @@
+{
+  "title": "Trailing Chrome Fixture",
+  "byline": null,
+  "dir": null,
+  "excerpt": "This fixture models a news story whose useful article body is followed by common page chrome. The first paragraph has enough sentence-like prose for extraction.",
+  "siteName": null,
+  "publishedTime": null,
+  "readerable": true
+}
