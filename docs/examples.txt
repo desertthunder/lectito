@@ -14,6 +14,8 @@ CONTENTS                                               *examples-contents*
 5. Community Pages ................................. |examples-community|
 6. Reference Pages ................................. |examples-reference|
 7. Edge Cases ...................................... |examples-edge-cases|
+8. Images .......................................... |examples-images|
+9. Sources ......................................... |examples-sources|
 
 ===============================================================================
 1. Overview                                          *examples-overview*
@@ -90,7 +92,13 @@ https://codemirror.net/examples/basic/
 https://prismjs.com/examples.html
 
 ===============================================================================
-8. Sources                                              *examples-sources*
+8. Images                                                     *examples-images*
+
+https://web.dev/articles/responsive-images
+https://developer.mozilla.org/en-US/docs/Learn_web_development/Core/Structuring_content/HTML_images
+
+===============================================================================
+9. Sources                                                   *examples-sources*
 
 Many of these examples are sourced directly from defuddle.md & mozilla's
 readability.js test corpus.

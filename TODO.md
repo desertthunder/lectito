@@ -4,15 +4,6 @@
 
 Context: our markdown conversion currently lives in `crates/core/src/markdown.rs`.
 
-### Improve Image And Media Markdown
-
-- Prefer the best image candidate from `srcset`, including URLs with commas in CDN paths.
-- Preserve image `title` attributes in markdown image syntax.
-- Convert figures to image markdown followed by caption text, while avoiding content-wrapper figures.
-- Normalize `picture`, lazy-loaded images, placeholder `data:` images, `data-src`, and `data-srcset` before markdown conversion.
-- Convert YouTube and X/Twitter embeds to Obsidian-style embed links.
-- Current gap: images use only `src` and `alt`; local testing chose `small.jpg` over a larger `srcset` candidate.
-
 ### Preserve Inline Semantic Elements
 
 - Convert `mark` to `==highlight==`.

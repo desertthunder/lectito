@@ -2,12 +2,13 @@ pub(crate) mod code;
 mod footnotes;
 mod frontmatter;
 mod math;
+mod media;
 mod tables;
 
 pub use frontmatter::markdown_with_toml_frontmatter;
 
 use comrak::{Arena, Options};
-use comrak::{escape_commonmark_inline, escape_commonmark_link_destination, format_commonmark, parse_document};
+use comrak::{escape_commonmark_link_destination, format_commonmark, parse_document};
 use kuchiki::NodeRef;
 use kuchiki::traits::TendrilSink;
 
@@ -70,6 +71,7 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
         "math" | "mjx-container" => math::render_math(node, ctx).unwrap_or_else(|| render_children(node, ctx)),
         "script" => math::render_math(node, ctx).unwrap_or_default(),
         "span" | "img" if math::render_math(node, ctx).is_some() => math::render_math(node, ctx).unwrap_or_default(),
+        "iframe" | "video" | "audio" | "object" | "embed" => media::render_embed(node).unwrap_or_default(),
         "a" => {
             let label = inline_children(node, ctx);
             if label.is_empty() {
@@ -80,20 +82,14 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
                 label
             }
         }
-        "img" => {
-            let src = dom::attr(node, "src").unwrap_or_default();
-            if src.is_empty() {
-                String::new()
-            } else {
-                let alt = dom::attr(node, "alt").unwrap_or_default();
-                format!(
-                    "![{}]({})",
-                    escape_commonmark_inline(&alt),
-                    escape_commonmark_link_destination(&src)
-                )
-            }
-        }
+        "img" => media::render_image(node),
+        "picture" => media::render_picture(node),
+        "source" => String::new(),
+        "figure" => media::render_figure(node, ctx).unwrap_or_else(|| block(render_children(node, ctx))),
         "blockquote" => {
+            if let Some(embed) = media::render_embed(node) {
+                return block(embed);
+            }
             let inner = normalize_markdown(&render_children(node, ctx));
             let quoted = inner
                 .lines()
@@ -108,7 +104,6 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
         "table" => code::render_code_table(node, ctx).unwrap_or_else(|| tables::render_table(node, ctx)),
         "div" => code::render_code_container(node, ctx).unwrap_or_else(|| render_children(node, ctx)),
         "section" | "article" | "main" | "body" => render_children(node, ctx),
-        "figure" => block(render_children(node, ctx)),
         "figcaption" => block(inline_children(node, ctx)),
         "hr" => "\n\n---\n\n".to_string(),
         _ => render_children(node, ctx),
@@ -311,5 +306,79 @@ mod tests {
         assert!(markdown.contains("$$\ny = x^{2}\n$$"), "{markdown}");
         assert!(!markdown.contains("| --- |"), "{markdown}");
         assert!(!markdown.contains("<table>"), "{markdown}");
+    }
+
+    #[test]
+    fn prefers_largest_srcset_candidate_and_preserves_image_title() {
+        let markdown = html_to_markdown(
+            r#"<p><img src="small.jpg" srcset="https://cdn.example.com/image,w_400.jpg 400w, https://cdn.example.com/image,w_1600.jpg 1600w" alt="Hero" title="Launch view"></p>"#,
+        );
+
+        assert!(
+            markdown.contains(r#"![Hero](https://cdn.example.com/image,w_1600.jpg "Launch view")"#),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("small.jpg"), "{markdown}");
+    }
+
+    #[test]
+    fn normalizes_picture_lazy_and_placeholder_images() {
+        let markdown = html_to_markdown(
+            r#"<picture><source data-srcset="wide.webp 1200w, wide@2x.webp 2400w"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" data-src="fallback.jpg" alt="Wide"></picture>"#,
+        );
+
+        assert!(markdown.contains("![Wide](wide@2x.webp)"), "{markdown}");
+        assert!(!markdown.contains("data:image"), "{markdown}");
+    }
+
+    #[test]
+    fn converts_image_figures_with_captions_but_leaves_content_wrappers() {
+        let image_figure = html_to_markdown(
+            r#"<figure><img src="photo.jpg" alt="Photo"><figcaption>Photo caption <em>here</em>.</figcaption></figure>"#,
+        );
+
+        assert!(
+            image_figure.contains("![Photo](photo.jpg)\n\nPhoto caption *here*."),
+            "{image_figure}"
+        );
+
+        let wrapper = html_to_markdown(
+            r#"<figure><h2>Section</h2><p>Intro text.</p><img src="photo.jpg" alt="Photo"><figcaption>Caption</figcaption></figure>"#,
+        );
+
+        assert!(wrapper.contains("## Section"), "{wrapper}");
+        assert!(wrapper.contains("Intro text."), "{wrapper}");
+        assert!(wrapper.contains("![Photo](photo.jpg)"), "{wrapper}");
+    }
+
+    #[test]
+    fn converts_figures_with_wrapped_images() {
+        let markdown = html_to_markdown(
+            r#"<figure><p><a href="photo.html"><picture><source srcset="photo-large.jpg 1200w"><img src="photo-small.jpg" alt="Photo"></picture></a></p><figcaption>Wrapped caption.</figcaption></figure>"#,
+        );
+
+        assert!(
+            markdown.contains("![Photo](photo-large.jpg)\n\nWrapped caption."),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("photo-small.jpg"), "{markdown}");
+        assert!(!markdown.contains("photo.html"), "{markdown}");
+    }
+
+    #[test]
+    fn converts_youtube_and_twitter_embeds() {
+        let markdown = html_to_markdown(
+            r#"<iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ"></iframe><blockquote class="twitter-tweet"><p>Tweet</p><a href="https://twitter.com/example/status/12345">May 1</a></blockquote>"#,
+        );
+
+        assert!(
+            markdown.contains("![](https://www.youtube.com/watch?v=dQw4w9WgXcQ)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("![](https://twitter.com/example/status/12345)"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("> Tweet"), "{markdown}");
     }
 }
