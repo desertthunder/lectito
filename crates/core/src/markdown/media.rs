@@ -32,8 +32,24 @@ pub(super) fn render_picture(node: &NodeRef) -> String {
 }
 
 pub(super) fn render_figure(node: &NodeRef, ctx: RenderContext) -> Option<String> {
-    let media = renderable_media(node);
-    if media.len() != 1 || has_non_caption_text(node) {
+    let media = dom::select_nodes(node, "picture, img, iframe, video, audio, object, embed, blockquote")
+        .into_iter()
+        .filter(|candidate| dom::node_id(candidate) != dom::node_id(node))
+        .filter(|candidate| {
+            dom::node_name(candidate) != "img"
+                || !candidate.ancestors().any(|ancestor| {
+                    dom::node_id(&ancestor) != dom::node_id(node) && dom::node_name(&ancestor) == "picture"
+                })
+        })
+        .filter_map(|candidate| match dom::node_name(&candidate).as_str() {
+            "picture" => Some(render_picture(&candidate)),
+            "img" => Some(render_image(&candidate)),
+            "blockquote" | "iframe" | "video" | "audio" | "object" | "embed" => render_embed(&candidate),
+            _ => None,
+        })
+        .filter(|markdown| !markdown.is_empty())
+        .collect::<Vec<String>>();
+    if media.len() != 1 || !patterns::normalize_spaces(&non_caption_text(node)).trim().is_empty() {
         return None;
     }
 
@@ -51,7 +67,28 @@ pub(super) fn render_figure(node: &NodeRef, ctx: RenderContext) -> Option<String
 }
 
 pub(super) fn render_embed(node: &NodeRef) -> Option<String> {
-    embed_url(node).map(|url| format!("![]({})", escape_commonmark_link_destination(&url)))
+    let mut embed_url = None;
+    if dom::node_name(node) == "blockquote" {
+        let class = dom::attr(node, "class").unwrap_or_default();
+        if !class.contains("twitter-tweet") && !class.contains("x-tweet") {
+            embed_url = None
+        } else {
+            embed_url = dom::select_nodes(node, "a")
+                .into_iter()
+                .filter_map(|link| dom::attr(&link, "href"))
+                .find_map(|href| normalize_embed_url(&href))
+        }
+    } else {
+        for attr in ["src", "data-src", "data", "href"] {
+            if let Some(url) = dom::attr(node, attr) {
+                if let Some(embed) = normalize_embed_url(&url) {
+                    embed_url = Some(embed)
+                }
+            }
+        }
+    }
+
+    embed_url.map(|url| format!("![]({})", escape_commonmark_link_destination(&url)))
 }
 
 fn render_image_from_candidates(node: &NodeRef, candidates: Vec<ImageCandidate>) -> String {
@@ -99,8 +136,38 @@ fn srcset_candidates(node: &NodeRef, start_order: usize) -> Vec<ImageCandidate> 
 }
 
 fn parse_srcset(srcset: &str) -> Vec<ImageCandidate> {
-    split_srcset(srcset)
+    let parts: Vec<_> = srcset.split(',').collect();
+    let mut candidates = Vec::new();
+    let mut start = 0;
+    let mut current = String::new();
+
+    for (index, part) in parts.iter().enumerate() {
+        if !current.is_empty() {
+            current.push(',');
+        }
+        current.push_str(part);
+
+        if current
+            .split_whitespace()
+            .last()
+            .is_some_and(|value| parse_width_descriptor(value).is_some() || parse_density_descriptor(value).is_some())
+        {
+            if let Some(candidate) = srcset.get(start..start + current.len()) {
+                candidates.push(candidate.trim());
+            }
+            start += current.len() + usize::from(index + 1 < parts.len());
+            current.clear();
+        }
+    }
+    if !current.trim().is_empty() {
+        if let Some(candidate) = srcset.get(start..) {
+            candidates.push(candidate.trim());
+        }
+    }
+
+    candidates
         .into_iter()
+        .filter(|candidate| !candidate.is_empty())
         .filter_map(|candidate| {
             let mut parts = candidate.split_whitespace();
             let url = parts.next()?.to_string();
@@ -123,49 +190,17 @@ fn parse_density_descriptor(value: &str) -> Option<f32> {
     value.strip_suffix('x')?.parse::<f32>().ok()
 }
 
-fn split_srcset(srcset: &str) -> Vec<&str> {
-    let parts: Vec<_> = srcset.split(',').collect();
-    let mut candidates = Vec::new();
-    let mut start = 0;
-    let mut current = String::new();
-
-    for (index, part) in parts.iter().enumerate() {
-        if !current.is_empty() {
-            current.push(',');
-        }
-        current.push_str(part);
-
-        if has_srcset_descriptor(&current) {
-            if let Some(candidate) = srcset.get(start..start + current.len()) {
-                candidates.push(candidate.trim());
-            }
-            start += current.len() + usize::from(index + 1 < parts.len());
-            current.clear();
-        }
-    }
-    if !current.trim().is_empty() {
-        if let Some(candidate) = srcset.get(start..) {
-            candidates.push(candidate.trim());
-        }
-    }
-
-    candidates
-        .into_iter()
-        .filter(|candidate| !candidate.is_empty())
-        .collect()
-}
-
-fn has_srcset_descriptor(candidate: &str) -> bool {
-    candidate
-        .split_whitespace()
-        .last()
-        .is_some_and(|value| parse_width_descriptor(value).is_some() || parse_density_descriptor(value).is_some())
-}
-
 fn best_image_url(candidates: Vec<ImageCandidate>) -> Option<String> {
     candidates
         .into_iter()
-        .filter(|candidate| !is_placeholder_image(&candidate.url))
+        .filter(|candidate| {
+            let trimmed = candidate.url.trim().to_ascii_lowercase();
+            !(trimmed.is_empty()
+                || trimmed.starts_with("data:")
+                || trimmed == "#"
+                || trimmed == "about:blank"
+                || trimmed.contains("placeholder"))
+        })
         .max_by(|a, b| {
             image_score(a)
                 .total_cmp(&image_score(b))
@@ -176,89 +211,26 @@ fn best_image_url(candidates: Vec<ImageCandidate>) -> Option<String> {
 
 fn image_score(candidate: &ImageCandidate) -> f32 {
     if let Some(width) = candidate.width {
-        return width as f32;
+        width as f32
+    } else if let Some(density) = candidate.density {
+        density * 1000.0
+    } else {
+        0.0
     }
-    if let Some(density) = candidate.density {
-        return density * 1000.0;
-    }
-    0.0
-}
-
-fn is_placeholder_image(url: &str) -> bool {
-    let trimmed = url.trim().to_ascii_lowercase();
-    trimmed.is_empty()
-        || trimmed.starts_with("data:")
-        || trimmed == "#"
-        || trimmed == "about:blank"
-        || trimmed.contains("placeholder")
-}
-
-fn renderable_media(node: &NodeRef) -> Vec<String> {
-    dom::select_nodes(node, "picture, img, iframe, video, audio, object, embed, blockquote")
-        .into_iter()
-        .filter(|candidate| dom::node_id(candidate) != dom::node_id(node))
-        .filter(|candidate| dom::node_name(candidate) != "img" || !has_ancestor(candidate, "picture"))
-        .filter_map(|candidate| match dom::node_name(&candidate).as_str() {
-            "picture" => Some(render_picture(&candidate)),
-            "img" => Some(render_image(&candidate)),
-            "blockquote" | "iframe" | "video" | "audio" | "object" | "embed" => render_embed(&candidate),
-            _ => None,
-        })
-        .filter(|markdown| !markdown.is_empty())
-        .collect()
-}
-
-fn has_non_caption_text(node: &NodeRef) -> bool {
-    let text = non_caption_text(node);
-    !patterns::normalize_spaces(&text).trim().is_empty()
-}
-
-fn has_ancestor(node: &NodeRef, tag: &str) -> bool {
-    node.ancestors()
-        .any(|ancestor| dom::node_id(&ancestor) != dom::node_id(node) && dom::node_name(&ancestor) == tag)
 }
 
 fn non_caption_text(node: &NodeRef) -> String {
-    if let Some(text) = node.as_text() {
-        return text.borrow().to_string();
+    match node.as_text() {
+        Some(text) => text.borrow().to_string(),
+        None => match dom::node_name(node).as_str() {
+            "figcaption" | "picture" | "img" | "iframe" | "video" | "audio" | "object" | "embed" => String::new(),
+            _ => node
+                .children()
+                .map(|child| non_caption_text(&child))
+                .collect::<Vec<_>>()
+                .join(" "),
+        },
     }
-    if matches!(
-        dom::node_name(node).as_str(),
-        "figcaption" | "picture" | "img" | "iframe" | "video" | "audio" | "object" | "embed"
-    ) {
-        return String::new();
-    }
-    node.children()
-        .map(|child| non_caption_text(&child))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn embed_url(node: &NodeRef) -> Option<String> {
-    if dom::node_name(node) == "blockquote" {
-        return twitter_status_url(node);
-    }
-
-    for attr in ["src", "data-src", "data", "href"] {
-        if let Some(url) = dom::attr(node, attr) {
-            if let Some(embed) = normalize_embed_url(&url) {
-                return Some(embed);
-            }
-        }
-    }
-    None
-}
-
-fn twitter_status_url(node: &NodeRef) -> Option<String> {
-    let class = dom::attr(node, "class").unwrap_or_default();
-    if !class.contains("twitter-tweet") && !class.contains("x-tweet") {
-        return None;
-    }
-
-    dom::select_nodes(node, "a")
-        .into_iter()
-        .filter_map(|link| dom::attr(&link, "href"))
-        .find_map(|href| normalize_embed_url(&href))
 }
 
 fn normalize_embed_url(url: &str) -> Option<String> {
@@ -302,11 +274,9 @@ fn normalize_embed_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{best_image_url, parse_srcset};
-
     #[test]
     fn parses_srcset_urls_with_commas() {
-        let candidates = parse_srcset(
+        let candidates = super::parse_srcset(
             "https://cdn.example.com/image,w_400.jpg 400w, https://cdn.example.com/image,w_1600.jpg 1600w",
         );
 
@@ -314,16 +284,16 @@ mod tests {
         assert_eq!(candidates[0].url, "https://cdn.example.com/image,w_400.jpg");
         assert_eq!(candidates[1].url, "https://cdn.example.com/image,w_1600.jpg");
         assert_eq!(
-            best_image_url(candidates).as_deref(),
+            super::best_image_url(candidates).as_deref(),
             Some("https://cdn.example.com/image,w_1600.jpg")
         );
     }
 
     #[test]
     fn parses_srcset_without_spaces_after_commas() {
-        let candidates = parse_srcset("small.png 36w,medium.png 480w,large.png 2880w");
+        let candidates = super::parse_srcset("small.png 36w,medium.png 480w,large.png 2880w");
 
         assert_eq!(candidates.len(), 3);
-        assert_eq!(best_image_url(candidates).as_deref(), Some("large.png"));
+        assert_eq!(super::best_image_url(candidates).as_deref(), Some("large.png"));
     }
 }

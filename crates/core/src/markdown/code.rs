@@ -12,20 +12,11 @@ pub(crate) fn normalize_code_markup(root: &NodeRef) {
 }
 
 pub(super) fn render_code_block(node: &NodeRef, _ctx: RenderContext) -> String {
-    let code_node = dom::select_nodes(node, "code").into_iter().next();
-    let language = language_identifier(node)
-        .or_else(|| code_node.as_ref().and_then(language_identifier))
-        .or_else(|| ancestor_language_identifier(node));
-    let code = code_text(code_node.as_ref().unwrap_or(node));
-    fenced_code_block(code.trim_matches('\n'), language.as_deref())
+    CodeBlock::from_node(node).fenced_code_block()
 }
 
 pub(super) fn render_code_table(node: &NodeRef, _ctx: RenderContext) -> Option<String> {
-    let code = code_from_table(node)?;
-    Some(fenced_code_block(
-        code.text.trim_matches('\n'),
-        code.language.as_deref(),
-    ))
+    Some(CodeBlock::from_table(node)?.fenced_code_block())
 }
 
 pub(super) fn render_code_container(node: &NodeRef, ctx: RenderContext) -> Option<String> {
@@ -37,27 +28,13 @@ pub(super) fn render_code_container(node: &NodeRef, ctx: RenderContext) -> Optio
         return Some(render_code_block(&pre, ctx));
     }
 
-    let language = language_identifier(node);
+    let language = get_lang_id(node);
     let code = code_text(node);
     if code.trim().is_empty() {
         return None;
     }
-    Some(fenced_code_block(code.trim_matches('\n'), language.as_deref()))
-}
 
-fn fenced_code_block(code: &str, language: Option<&str>) -> String {
-    let fence = code_fence(code);
-    let language = language.unwrap_or_default();
-    format!("\n\n{fence}{language}\n{code}\n{fence}\n\n")
-}
-
-fn code_fence(code: &str) -> String {
-    let longest_run = code
-        .lines()
-        .flat_map(|line| line.split(|c| c != '`').map(str::len))
-        .max()
-        .unwrap_or(0);
-    "`".repeat(longest_run.max(3))
+    Some(CodeBlock::new(language, code).fenced_code_block())
 }
 
 fn code_text(node: &NodeRef) -> String {
@@ -115,9 +92,9 @@ fn code_text_fragment(node: &NodeRef) -> String {
     output
 }
 
-fn language_identifier(node: &NodeRef) -> Option<String> {
+fn get_lang_id(node: &NodeRef) -> Option<String> {
     for attr in ["data-lang", "data-language", "language", "lang"] {
-        if let Some(language) = dom::attr(node, attr).and_then(|value| clean_language_identifier(&value)) {
+        if let Some(language) = dom::attr(node, attr).and_then(|value| clean_lang_id(&value)) {
             return Some(language);
         }
     }
@@ -126,19 +103,18 @@ fn language_identifier(node: &NodeRef) -> Option<String> {
     language_from_class(&class)
 }
 
-fn ancestor_language_identifier(node: &NodeRef) -> Option<String> {
+fn ancestor_lang_id(node: &NodeRef) -> Option<String> {
     node.ancestors()
         .skip(1)
         .take(4)
-        .find_map(|ancestor| language_identifier(&ancestor))
+        .find_map(|ancestor| get_lang_id(&ancestor))
 }
 
 fn language_from_class(class: &str) -> Option<String> {
-    class.split_whitespace().find_map(clean_language_class).or_else(|| {
-        class
-            .split_once("brush:")
-            .and_then(|(_, value)| clean_language_identifier(value))
-    })
+    class
+        .split_whitespace()
+        .find_map(clean_language_class)
+        .or_else(|| class.split_once("brush:").and_then(|(_, value)| clean_lang_id(value)))
 }
 
 fn clean_language_class(class: &str) -> Option<String> {
@@ -148,10 +124,10 @@ fn clean_language_class(class: &str) -> Option<String> {
         .or_else(|| class.strip_prefix("highlight-source-"))
         .or_else(|| class.strip_prefix("brush:"))
         .or_else(|| class.strip_prefix("syntax--"))?;
-    clean_language_identifier(value)
+    clean_lang_id(value)
 }
 
-fn clean_language_identifier(value: &str) -> Option<String> {
+fn clean_lang_id(value: &str) -> Option<String> {
     let value = value
         .trim()
         .trim_matches(|c: char| c == ';' || c == ':' || c == ',' || c == '"' || c == '\'')
@@ -268,7 +244,7 @@ fn remove_code_chrome(root: &NodeRef) {
 
 fn normalize_code_tables(root: &NodeRef) {
     for table in dom::select_nodes(root, "table") {
-        let Some(code) = code_from_table(&table) else {
+        let Some(code) = CodeBlock::from_table(&table) else {
             continue;
         };
         replace_with_pre(&table, code.language.as_deref(), &code.text);
@@ -278,7 +254,7 @@ fn normalize_code_tables(root: &NodeRef) {
 fn normalize_standalone_code_containers(root: &NodeRef) {
     for node in dom::select_nodes(root, "div") {
         if dom::select_nodes(&node, "pre").is_empty() && is_standalone_code_container(&node) {
-            let code = CodeBlock { language: language_identifier(&node), text: code_text(&node) };
+            let code = CodeBlock { language: get_lang_id(&node), text: code_text(&node) };
             if !code.text.trim().is_empty() {
                 replace_with_pre(&node, code.language.as_deref(), &code.text);
             }
@@ -289,9 +265,9 @@ fn normalize_standalone_code_containers(root: &NodeRef) {
 fn normalize_pre_blocks(root: &NodeRef) {
     for pre in dom::select_nodes(root, "pre") {
         let code_node = dom::select_nodes(&pre, "code").into_iter().next();
-        let language = language_identifier(&pre)
-            .or_else(|| code_node.as_ref().and_then(language_identifier))
-            .or_else(|| ancestor_language_identifier(&pre));
+        let language = get_lang_id(&pre)
+            .or_else(|| code_node.as_ref().and_then(get_lang_id))
+            .or_else(|| ancestor_lang_id(&pre));
         let text = code_text(code_node.as_ref().unwrap_or(&pre));
         replace_with_pre(&pre, language.as_deref(), text.trim_matches('\n'));
     }
@@ -302,27 +278,69 @@ struct CodeBlock {
     text: String,
 }
 
-fn code_from_table(node: &NodeRef) -> Option<CodeBlock> {
-    let has_code_table_shape = has_class_token(node, "highlighttable")
-        || has_class_token(node, "rouge-table")
-        || has_class_token(node, "highlight")
-        || !dom::select_nodes(node, "td.linenos, td.rouge-gutter, td.gutter, td.code, td.rouge-code").is_empty();
-    if !has_code_table_shape {
-        return None;
+impl CodeBlock {
+    fn new(language: Option<String>, text: String) -> Self {
+        Self { language, text }
     }
 
-    let code_cell = dom::select_nodes(node, "td.code, td.rouge-code")
-        .into_iter()
-        .next()
-        .or_else(|| {
-            dom::select_nodes(node, "td")
-                .into_iter()
-                .filter(|cell| !is_line_number_node(cell))
-                .max_by_key(|cell| code_text(cell).trim().len())
-        })?;
-    let text = code_text(&code_cell);
-    (!text.trim().is_empty())
-        .then(|| CodeBlock { language: language_identifier(node).or_else(|| language_identifier(&code_cell)), text })
+    fn from_node(node: &NodeRef) -> Self {
+        let code_node = dom::select_nodes(node, "code").into_iter().next();
+        Self::new(
+            get_lang_id(node)
+                .or_else(|| code_node.as_ref().and_then(get_lang_id))
+                .or_else(|| ancestor_lang_id(node)),
+            code_text(code_node.as_ref().unwrap_or(node)),
+        )
+    }
+
+    fn from_table(node: &NodeRef) -> Option<CodeBlock> {
+        if !(has_class_token(node, "highlighttable")
+            || has_class_token(node, "rouge-table")
+            || has_class_token(node, "highlight")
+            || !dom::select_nodes(node, "td.linenos, td.rouge-gutter, td.gutter, td.code, td.rouge-code").is_empty())
+        {
+            return None;
+        }
+
+        let code_cell = dom::select_nodes(node, "td.code, td.rouge-code")
+            .into_iter()
+            .next()
+            .or_else(|| {
+                dom::select_nodes(node, "td")
+                    .into_iter()
+                    .filter(|cell| !is_line_number_node(cell))
+                    .max_by_key(|cell| code_text(cell).trim().len())
+            })?;
+        let text = code_text(&code_cell);
+        (!text.trim().is_empty())
+            .then(|| CodeBlock { language: get_lang_id(node).or_else(|| get_lang_id(&code_cell)), text })
+    }
+
+    fn code(&self) -> String {
+        self.text.trim_matches('\n').to_string()
+    }
+
+    fn language(&self) -> &str {
+        self.language.as_deref().unwrap_or_default()
+    }
+
+    fn fenced_code_block(&self) -> String {
+        let longest_run = self
+            .code()
+            .lines()
+            .flat_map(|line| line.split(|c| c != '`').map(str::len))
+            .max()
+            .unwrap_or(0);
+
+        format!(
+            r#"{fence}{lang}
+{code}
+{fence}"#,
+            lang = self.language(),
+            fence = "`".repeat(longest_run.max(3)),
+            code = self.code()
+        )
+    }
 }
 
 fn replace_with_pre(node: &NodeRef, language: Option<&str>, text: &str) {
