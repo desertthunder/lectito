@@ -38,6 +38,8 @@ enum Command {
 #[derive(Debug, Args)]
 struct ParseArgs {
     path: Option<PathBuf>,
+    #[arg(short = 'i', long = "input", value_name = "PATH")]
+    input: Option<PathBuf>,
     #[arg(long)]
     stdin: bool,
     #[arg(long)]
@@ -109,7 +111,8 @@ enum DiagnosticFormat {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Parse(args) => {
-            let input = read_input(args.path.as_deref(), args.stdin, args.url.as_deref())?;
+            let input_path = input_path(args.path.as_deref(), args.input.as_deref())?;
+            let input = read_input(input_path, args.stdin, args.url.as_deref())?;
             let options = ReadabilityOptions {
                 max_elems_to_parse: args.max_elems_to_parse,
                 nb_top_candidates: args.nb_top_candidates,
@@ -138,6 +141,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn input_path<'a>(path: Option<&'a Path>, input: Option<&'a Path>) -> anyhow::Result<Option<&'a Path>> {
+    match (path, input) {
+        (Some(_), Some(_)) => anyhow::bail!("cannot combine a file path with -i/--input"),
+        (Some(path), None) | (None, Some(path)) => Ok(Some(path)),
+        (None, None) => Ok(None),
+    }
 }
 
 fn print_diagnostics(diagnostics: &ExtractionDiagnostics, format: DiagnosticFormat) -> anyhow::Result<()> {
@@ -706,5 +717,26 @@ mod tests {
         let current_url = Url::parse("https://example.com/post").unwrap();
 
         assert!(html_redirect_target(html, &current_url).is_none());
+    }
+
+    #[test]
+    fn parse_accepts_short_input_path() {
+        let cli = Cli::try_parse_from(["readability", "parse", "-i", "article.html", "--format", "markdown"])
+            .expect("parse args should accept -i input");
+
+        let Command::Parse(args) = cli.command else {
+            panic!("expected parse command");
+        };
+
+        assert_eq!(args.input.as_deref(), Some(Path::new("article.html")));
+        assert!(matches!(args.format, OutputFormat::Markdown));
+    }
+
+    #[test]
+    fn input_path_rejects_positional_and_flag_paths() {
+        let error = input_path(Some(Path::new("positional.html")), Some(Path::new("flag.html")))
+            .expect_err("two input paths should be rejected");
+
+        assert!(error.to_string().contains("cannot combine"));
     }
 }
