@@ -12,7 +12,7 @@ use comrak::{escape_commonmark_link_destination, format_commonmark, parse_docume
 use kuchiki::NodeRef;
 use kuchiki::traits::TendrilSink;
 
-use super::{dom, patterns};
+use super::{dom, patterns, serialize};
 
 pub fn html_to_markdown(html: &str) -> String {
     let document = kuchiki::parse_html().one(format!("<html><body>{html}</body></html>"));
@@ -66,6 +66,9 @@ fn render_node(node: &NodeRef, ctx: RenderContext) -> String {
         "br" => "  \n".to_string(),
         "strong" | "b" => format!("**{}**", inline_children(node, ctx)),
         "em" | "i" => format!("*{}*", inline_children(node, ctx)),
+        "mark" => wrap_inline("==", inline_children(node, ctx)),
+        "del" | "s" | "strike" => wrap_inline("~~", inline_children(node, ctx)),
+        "sup" | "sub" | "svg" => serialize::serialize_node(node).unwrap_or_else(|_| render_children(node, ctx)),
         "code" if !ctx.in_pre => format!("`{}`", inline_children(node, ctx).replace('`', "\\`")),
         "pre" => code::render_code_block(node, ctx),
         "math" | "mjx-container" => math::render_math(node, ctx).unwrap_or_else(|| render_children(node, ctx)),
@@ -147,6 +150,10 @@ fn block(value: String) -> String {
     if value.is_empty() { String::new() } else { format!("\n\n{value}\n\n") }
 }
 
+fn wrap_inline(marker: &str, value: String) -> String {
+    if value.is_empty() { String::new() } else { format!("{marker}{value}{marker}") }
+}
+
 pub(super) fn normalize_markdown(value: &str) -> String {
     let mut output = String::new();
     let mut blank_count = 0;
@@ -184,6 +191,7 @@ fn format_with_comrak(markdown: &str) -> String {
     let mut options = Options::default();
     options.extension.footnotes = true;
     options.extension.math_dollars = true;
+    options.extension.strikethrough = true;
     options.extension.table = true;
     options.parse.leave_footnote_definitions = true;
     let root = parse_document(&arena, markdown, &options);
@@ -197,6 +205,7 @@ fn format_with_comrak(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::html_to_markdown;
+    use crate::{ReadabilityOptions, extract};
 
     #[test]
     fn converts_representative_article_html() {
@@ -306,6 +315,79 @@ mod tests {
         assert!(markdown.contains("$$\ny = x^{2}\n$$"), "{markdown}");
         assert!(!markdown.contains("| --- |"), "{markdown}");
         assert!(!markdown.contains("<table>"), "{markdown}");
+    }
+
+    #[test]
+    fn preserves_inline_highlight_and_strikethrough_semantics() {
+        let markdown = html_to_markdown(
+            r#"<p>Use <mark>exact match</mark>, not <del>approximate</del>, <s>old</s>, or <strike>stale</strike> terms.</p>"#,
+        );
+
+        assert!(
+            markdown.contains("Use ==exact match==, not ~~approximate~~, ~~old~~, or ~~stale~~ terms."),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn preserves_non_footnote_superscript_and_subscript_semantics() {
+        let markdown = html_to_markdown(r#"<p>Area is 10<sup>2</sup> m<sup>2</sup>; water is H<sub>2</sub>O.</p>"#);
+
+        assert!(
+            markdown.contains("Area is 10<sup>2</sup> m<sup>2</sup>; water is H<sub>2</sub>O."),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn preserves_inline_svg_semantics() {
+        let markdown = html_to_markdown(
+            r#"<p>Status <svg viewBox="0 0 10 10" role="img" aria-label="circle"><circle cx="5" cy="5" r="4"></circle></svg> active.</p>"#,
+        );
+
+        assert!(markdown.contains("<svg "), "{markdown}");
+        assert!(markdown.contains(r#"viewBox="0 0 10 10""#), "{markdown}");
+        assert!(markdown.contains(r#"role="img""#), "{markdown}");
+        assert!(markdown.contains(r#"aria-label="circle""#), "{markdown}");
+        assert!(
+            markdown.contains(r#"<circle cx="5" cy="5" r="4"></circle>"#),
+            "{markdown}"
+        );
+        assert!(markdown.contains("active."), "{markdown}");
+    }
+
+    #[test]
+    fn fixture_preserves_inline_semantics_in_article_markdown() {
+        let fixture = lectito_fixtures::load_fixture("inline-semantic-elements").unwrap();
+        let article = extract(
+            &fixture.source,
+            Some("https://developer.mozilla.org/en-US/docs/Web/HTML/Element/mark"),
+            &ReadabilityOptions::default(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(
+            article.markdown.contains("==highlight matching terms=="),
+            "{}",
+            article.markdown
+        );
+        assert!(article.markdown.contains("~~removed wording~~"), "{}", article.markdown);
+        assert!(article.markdown.contains("~~obsolete labels~~"), "{}", article.markdown);
+        assert!(article.markdown.contains("H<sub>2</sub>O"), "{}", article.markdown);
+        assert!(
+            article.markdown.contains("10<sup>2</sup> m<sup>2</sup>"),
+            "{}",
+            article.markdown
+        );
+        assert!(article.markdown.contains("<svg "), "{}", article.markdown);
+        assert!(
+            article
+                .markdown
+                .contains("![](https://www.youtube.com/watch?v=LtOGa5M8AuU)"),
+            "{}",
+            article.markdown
+        );
     }
 
     #[test]

@@ -21,15 +21,6 @@ metadata/header cleanup.
 
 ## Markdown Conversion
 
-Context: our markdown conversion currently lives in `crates/core/src/markdown.rs`.
-
-### Preserve Inline Semantic Elements
-
-- Convert `mark` to `==highlight==`.
-- Convert `del`, `s`, and `strike` to `~~strikethrough~~`.
-- Preserve or intentionally handle `sup`, `sub`, `iframe`, `video`, `audio`, `svg`, and `math`.
-- Current gap: these elements usually render as plain child text, losing semantic meaning.
-
 ### Markdown Cleanup Edge Cases
 
 - Strip `<wbr>` without introducing spaces.
