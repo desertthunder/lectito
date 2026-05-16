@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use scraper::Html;
 use url::Url;
 
@@ -7,6 +9,25 @@ use super::config::ReadabilityOptions;
 use super::{json_schema, patterns};
 
 const TITLE_SEPARATORS: &[&str] = &[" | ", " - ", " – ", " — ", " \\ ", " / ", " > ", " » "];
+
+static BYLINE_PREFIX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^\s*(by|author|authors|written by)\s+").expect("valid byline prefix regex"));
+
+static BYLINE_TRAILING_DATE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?ix)
+        \s+
+        (
+            (published|updated|last\s+updated|posted|on)\b.*$
+            |
+            (jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}.*$
+            |
+            \d{4}[-/]\d{1,2}[-/]\d{1,2}.*$
+        )
+        ",
+    )
+    .expect("valid byline trailing date regex")
+});
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Metadata {
@@ -57,6 +78,9 @@ pub(crate) fn extract_metadata(
         }
     }
 
+    metadata.site_name = metadata
+        .site_name
+        .or_else(|| first_value(&values, &["og:site_name", "application-name"]));
     metadata.title = metadata
         .title
         .or_else(|| {
@@ -75,6 +99,7 @@ pub(crate) fn extract_metadata(
                 ],
             )
         })
+        .and_then(|title| prefer_specific_headline(document, metadata.site_name.as_deref(), &title))
         .or_else(|| article_title(document));
     metadata.byline = metadata
         .byline
@@ -111,12 +136,12 @@ pub(crate) fn extract_metadata(
             ],
         )
     });
-    metadata.site_name = metadata
-        .site_name
-        .or_else(|| first_value(&values, &["og:site_name", "application-name"]));
     metadata.published_time = metadata
         .published_time
         .or_else(|| first_value(&values, &["article:published_time", "parsely-pub-date", "publishdate"]));
+    metadata.published_time = metadata
+        .published_time
+        .or_else(|| published_time_from_document(document));
     metadata.image = metadata
         .image
         .or_else(|| first_value(&values, &["og:image", "twitter:image", "sailthru:image:full", "image"]))
@@ -251,6 +276,36 @@ fn article_title(document: &Html) -> Option<String> {
     Some(title)
 }
 
+fn prefer_specific_headline(document: &Html, site_name: Option<&str>, title: &str) -> Option<String> {
+    let title = patterns::normalize_spaces(title.trim());
+    if title.is_empty() {
+        return None;
+    }
+
+    let headline = specific_heading(document);
+    if let (Some(site_name), Some(headline)) = (site_name, headline.as_deref()) {
+        if title.eq_ignore_ascii_case(site_name) && word_count(headline) >= 3 {
+            return Some(headline.to_string());
+        }
+    }
+
+    if word_count(&title) <= 2 {
+        if let Some(headline) = headline.filter(|headline| word_count(headline) >= 3) {
+            return Some(headline);
+        }
+    }
+
+    Some(title)
+}
+
+fn specific_heading(document: &Html) -> Option<String> {
+    let selector = patterns::selector(r#"article h1, main h1, [role="main"] h1, h1"#);
+    document
+        .select(&selector)
+        .map(|heading| patterns::normalize_spaces(heading.text().collect::<String>().trim()))
+        .find(|heading| !heading.is_empty())
+}
+
 fn last_separator(title: &str) -> Option<(&'static str, usize)> {
     TITLE_SEPARATORS
         .iter()
@@ -270,6 +325,10 @@ fn heading_matches(document: &Html, title: &str) -> bool {
 }
 
 fn byline_from_document(document: &Html) -> Option<String> {
+    if let Some(byline) = byline_from_latexml(document) {
+        return Some(byline);
+    }
+
     for selector in [
         r#"[itemprop*="author"] [itemprop*="name"], [rel="author"] [itemprop*="name"], a[rel="author"], [class*="author"] a[href*="/author/"], [class*="byline"] a[href*="/author/"]"#,
         r#"[rel="author"], [itemprop*="author"]"#,
@@ -285,6 +344,9 @@ fn byline_from_document(document: &Html) -> Option<String> {
 fn byline_from_selector(document: &Html, selector: &str) -> Option<String> {
     let selector = patterns::selector(selector);
     for element in document.select(&selector) {
+        if byline_element_is_chrome(&element) {
+            continue;
+        }
         let text = if element
             .value()
             .attr("itemprop")
@@ -300,15 +362,88 @@ fn byline_from_selector(document: &Html, selector: &str) -> Option<String> {
             element.text().collect::<String>()
         };
         let byline = clean_byline(&text);
-        if !byline.is_empty() && byline.chars().count() < 100 {
+        if plausible_byline(&byline) {
             return Some(byline);
         }
     }
     None
 }
 
+fn byline_from_latexml(document: &Html) -> Option<String> {
+    let selector = patterns::selector(".ltx_authors .ltx_personname");
+    for element in document.select(&selector) {
+        let text = element.text().collect::<Vec<_>>().join("\n");
+        let mut names = Vec::new();
+        for chunk in text.split('&') {
+            let mut lines = chunk
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.contains('@'));
+            let Some(name) = lines.next() else {
+                continue;
+            };
+            let Some(name) = clean_metadata_value(name) else {
+                continue;
+            };
+            if plausible_byline(&name)
+                && !names
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(&name))
+            {
+                names.push(name);
+            }
+        }
+        if !names.is_empty() {
+            return Some(names.join(", "));
+        }
+    }
+    None
+}
+
+fn byline_element_is_chrome(element: &scraper::ElementRef<'_>) -> bool {
+    element
+        .ancestors()
+        .filter_map(scraper::ElementRef::wrap)
+        .any(|ancestor| {
+            let attrs = [
+                ancestor.value().attr("class").unwrap_or_default(),
+                ancestor.value().attr("id").unwrap_or_default(),
+                ancestor.value().attr("data-component").unwrap_or_default(),
+                ancestor.value().attr("data-testid").unwrap_or_default(),
+            ]
+            .join(" ")
+            .to_ascii_lowercase();
+            [
+                "backlink",
+                "comment",
+                "follow-author",
+                "mention",
+                "profile",
+                "reply",
+                "webmention",
+            ]
+            .iter()
+            .any(|needle| attrs.contains(needle))
+        })
+}
+
 fn clean_byline(value: &str) -> String {
-    patterns::normalize_spaces(value.trim())
+    let value = patterns::normalize_spaces(value.trim());
+    let value = BYLINE_PREFIX.replace(&value, "");
+    let value = BYLINE_TRAILING_DATE.replace(&value, "");
+    patterns::normalize_spaces(value.trim().trim_matches(['-', '|', '•']).trim())
+}
+
+fn plausible_byline(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    !value.is_empty()
+        && value.chars().count() < 140
+        && !matches!(
+            lower.as_str(),
+            "author" | "authors" | "by" | "byline" | "follow author" | "about the author"
+        )
+        && !lower.contains("work done exclusively")
+        && !lower.contains("authors ordered")
 }
 
 pub(crate) fn normalize_byline(value: &str) -> Option<String> {
@@ -321,8 +456,7 @@ pub(crate) fn normalize_byline(value: &str) -> Option<String> {
         let Some(author) = clean_metadata_value(part) else {
             continue;
         };
-        let lower = author.to_lowercase();
-        if matches!(lower.as_str(), "author" | "authors" | "by" | "byline") {
+        if !plausible_byline(&author) {
             continue;
         }
         if !seen.iter().any(|existing| existing.eq_ignore_ascii_case(&author)) {
@@ -360,6 +494,19 @@ fn canonical_url(document: &Html) -> Option<String> {
     document
         .select(&selector)
         .find_map(|link| link.value().attr("href").and_then(clean_metadata_value))
+}
+
+fn published_time_from_document(document: &Html) -> Option<String> {
+    let selector = patterns::selector(
+        r#"time[datetime], [itemprop*="datePublished"][datetime], [itemprop*="datePublished"][content], [property="article:published_time"][content]"#,
+    );
+    document.select(&selector).find_map(|element| {
+        element
+            .value()
+            .attr("datetime")
+            .or_else(|| element.value().attr("content"))
+            .and_then(clean_metadata_value)
+    })
 }
 
 fn absolutize_url(value: &str, base_url: Option<&Url>) -> Option<String> {

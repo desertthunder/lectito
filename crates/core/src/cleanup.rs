@@ -4,6 +4,7 @@ use regex::Regex;
 use url::Url;
 
 use super::config::{ExtractFlags, ReadabilityOptions};
+use super::metadata::Metadata;
 use super::patterns::{
     AD_OR_LOADING_WORDS, COMMA, DEFAULT_CLASSES_TO_PRESERVE, DEPRECATED_SIZE_ATTRIBUTE_ELEMS,
     PRESENTATIONAL_ATTRIBUTES, SHARE_ELEMENTS,
@@ -50,9 +51,23 @@ static FOOTNOTE_REFERENCE_TEXT: Lazy<Regex> = Lazy::new(|| {
         .expect("valid footnote reference text regex")
 });
 
+static LEADING_DATE_TEXT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?ix)^\s*
+        (
+            (jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}
+            |
+            \d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{4}
+            |
+            \d{4}[-/]\d{1,2}[-/]\d{1,2}
+        )
+        \s*$",
+    )
+    .expect("valid leading date text regex")
+});
+
 pub(crate) fn cleanup_article(
-    nodes: &[NodeRef], options: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>,
-    article_title: Option<&str>,
+    nodes: &[NodeRef], options: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>, metadata: &Metadata,
 ) {
     for node in nodes {
         clean_styles(node);
@@ -65,7 +80,8 @@ pub(crate) fn cleanup_article(
         clean_embeds(node);
         remove_share_nodes(node);
         remove_trailing_page_chrome(node);
-        clean_headers(node, article_title, flags);
+        clean_headers(node, metadata.title.as_deref(), flags);
+        clean_leading_article_metadata(node, metadata);
         markdown::code::normalize_code_markup(node);
         if flags.clean_conditionally {
             clean_conditionally(node, options, flags);
@@ -327,6 +343,201 @@ fn clean_headers(root: &NodeRef, article_title: Option<&str>, flags: ExtractFlag
             node.detach();
         }
     }
+}
+
+fn clean_leading_article_metadata(root: &NodeRef, metadata: &Metadata) {
+    for node in dom::select_nodes(root, "header, hgroup") {
+        if dom::node_id(&node) == dom::node_id(root) {
+            continue;
+        }
+        if looks_like_article_header(&node, metadata) {
+            node.detach();
+        }
+    }
+
+    for node in dom::select_nodes(root, "time") {
+        if matches_metadata_value(&dom::inner_text(&node), metadata.published_time.as_deref())
+            || dom::attr(&node, "datetime").is_some()
+        {
+            node.detach();
+        }
+    }
+    for node in dom::select_nodes(root, "p, div, span") {
+        if dom::node_id(&node) != dom::node_id(root) && is_leading_date_node(&node) {
+            node.detach();
+        }
+    }
+
+    trim_leading_metadata_siblings(root, metadata);
+    for child in root.children().filter(|node| node.as_element().is_some()) {
+        if !has_meaningful_article_content(&child) || dom::inner_text(&child).chars().count() < 400 {
+            trim_leading_metadata_siblings(&child, metadata);
+        }
+    }
+}
+
+fn trim_leading_metadata_siblings(root: &NodeRef, metadata: &Metadata) {
+    for child in root
+        .children()
+        .filter(|node| node.as_element().is_some())
+        .collect::<Vec<_>>()
+    {
+        if is_leading_metadata_node(&child, metadata) {
+            child.detach();
+            continue;
+        }
+
+        if has_meaningful_article_content(&child) {
+            break;
+        }
+
+        let text_len = dom::inner_text(&child).chars().count();
+        if text_len > 120 {
+            break;
+        }
+    }
+}
+
+fn looks_like_article_header(node: &NodeRef, metadata: &Metadata) -> bool {
+    if matches!(
+        dom::node_name(node).as_str(),
+        "body" | "main" | "article" | "section" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+    ) {
+        return false;
+    }
+    let text = dom::inner_text(node);
+    let text_len = text.chars().count();
+    if text_len > 900 {
+        return false;
+    }
+    if metadata
+        .title
+        .as_deref()
+        .is_some_and(|title| text_similarity(title, &text) > 0.55)
+    {
+        return true;
+    }
+    if is_byline_node(node, metadata) || contains_published_time(node, metadata) {
+        return true;
+    }
+    if is_leading_date_node(node) {
+        return true;
+    }
+    !dom::select_nodes(node, "h1, h2, time, address, figure, img, picture").is_empty()
+        && dom::select_nodes(node, "p")
+            .into_iter()
+            .all(|paragraph| dom::inner_text(&paragraph).chars().count() < 120)
+}
+
+fn is_leading_metadata_node(node: &NodeRef, metadata: &Metadata) -> bool {
+    let tag = dom::node_name(node);
+    if matches!(tag.as_str(), "hgroup" | "address" | "time") {
+        return true;
+    }
+    if matches!(tag.as_str(), "figure" | "picture" | "img") && is_hero_media_node(node) {
+        return true;
+    }
+    if matches!(tag.as_str(), "picture" | "img") {
+        return false;
+    }
+    if is_byline_node(node, metadata) || contains_published_time(node, metadata) {
+        return true;
+    }
+    if looks_like_article_header(node, metadata) {
+        return true;
+    }
+
+    let attrs = metadata_signal_attrs(node);
+    if attrs.contains("dek") || attrs.contains("standfirst") || attrs.contains("subtitle") {
+        return false;
+    }
+    let text_len = dom::inner_text(node).chars().count();
+    text_len < 220
+        && !attrs.is_empty()
+        && [
+            "byline",
+            "author",
+            "avatar",
+            "dateline",
+            "timestamp",
+            "meta",
+            "metadata",
+        ]
+        .iter()
+        .any(|needle| attrs.contains(needle))
+}
+
+fn is_hero_media_node(node: &NodeRef) -> bool {
+    let attrs = metadata_signal_attrs(node);
+    if ![
+        "hero",
+        "lead",
+        "lede",
+        "header",
+        "featured",
+        "main-image",
+        "primary-image",
+    ]
+    .iter()
+    .any(|needle| attrs.contains(needle))
+    {
+        return false;
+    }
+    let text_len = dom::inner_text(node).chars().count();
+    text_len < 240 && !dom::select_nodes(node, "img, picture, source").is_empty()
+}
+
+fn is_byline_node(node: &NodeRef, metadata: &Metadata) -> bool {
+    let attrs = metadata_signal_attrs(node);
+    let text = dom::inner_text(node);
+    let text_len = text.chars().count();
+    if text_len == 0 || text_len > 260 {
+        return false;
+    }
+    if metadata
+        .byline
+        .as_deref()
+        .is_some_and(|byline| matches_metadata_value(&text, Some(byline)))
+    {
+        return true;
+    }
+    (attrs.contains("byline") || attrs.contains("author") || attrs.contains("dateline")) && text_len < 180
+}
+
+fn contains_published_time(node: &NodeRef, metadata: &Metadata) -> bool {
+    if !dom::select_nodes(node, "time").is_empty() {
+        return true;
+    }
+    let text = dom::inner_text(node);
+    matches_metadata_value(&text, metadata.published_time.as_deref())
+}
+
+fn is_leading_date_node(node: &NodeRef) -> bool {
+    let text = dom::inner_text(node);
+    text.chars().count() < 80 && LEADING_DATE_TEXT.is_match(&text)
+}
+
+fn matches_metadata_value(text: &str, metadata_value: Option<&str>) -> bool {
+    let Some(metadata_value) = metadata_value else {
+        return false;
+    };
+    let text = text.to_lowercase();
+    let metadata_value = metadata_value.to_lowercase();
+    !metadata_value.trim().is_empty() && (text.contains(&metadata_value) || metadata_value.contains(text.trim()))
+}
+
+fn metadata_signal_attrs(node: &NodeRef) -> String {
+    let attrs = dom::attrs(node);
+    [
+        attrs.get("class").map(String::as_str).unwrap_or_default(),
+        attrs.get("id").map(String::as_str).unwrap_or_default(),
+        attrs.get("itemprop").map(String::as_str).unwrap_or_default(),
+        attrs.get("property").map(String::as_str).unwrap_or_default(),
+        attrs.get("data-testid").map(String::as_str).unwrap_or_default(),
+        attrs.get("data-component").map(String::as_str).unwrap_or_default(),
+    ]
+    .join(" ")
+    .to_ascii_lowercase()
 }
 
 fn text_similarity(a: &str, b: &str) -> f32 {

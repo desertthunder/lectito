@@ -53,7 +53,7 @@ pub(crate) fn apply_schema_fallback(
     prep_document(&document, opts, flags);
     if let Some(root) = smallest_schema_match(&document, &normalized_schema) {
         let matched_len = normalized_match_text(&dom::inner_text(&root)).chars().count();
-        let (fallback, _) = serialize_roots(vec![root], opts, flags, base_url, metadata.title.as_deref())?;
+        let (fallback, _) = serialize_roots(vec![root], opts, flags, base_url, metadata)?;
         if fallback.text_len > attempt.text_len
             || (matched_len >= schema_len.saturating_mul(4) / 5 && extracted_len > matched_len.saturating_mul(6) / 5)
         {
@@ -71,7 +71,7 @@ pub(crate) fn apply_schema_fallback(
     let Some(root) = dom::select_nodes(&document, "article").into_iter().next() else {
         return Ok(attempt);
     };
-    let (fallback, _) = serialize_roots(vec![root], opts, flags, base_url, metadata.title.as_deref())?;
+    let (fallback, _) = serialize_roots(vec![root], opts, flags, base_url, metadata)?;
     if fallback.text_len > attempt.text_len { Ok(fallback) } else { Ok(attempt) }
 }
 

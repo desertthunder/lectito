@@ -13,13 +13,6 @@ metadata/header cleanup.
 - Retry with hidden-element removal disabled when the first result is extremely short.
 - Prefer a larger focused subtree when the current result is only notes, metadata, or a single step.
 
-### Improve Metadata And Header Cleanup
-
-- Separate title, author, date, and hero/header blocks from the article body before markdown conversion.
-- Avoid using site names as titles when a more specific article headline is available.
-- Improve byline extraction when author cards, avatars, and timestamps are adjacent to the first paragraph.
-- Use schema.org fields as a fallback for title, author, description, published time, and article body.
-
 ### Clean Reference Site Chrome
 
 - Remove skip links, "from Wikipedia" boilerplate, edit links, table-of-contents blocks, and infoboxes when extracting reference pages.

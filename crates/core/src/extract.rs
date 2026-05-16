@@ -55,7 +55,7 @@ pub fn extract_with_diagnostics(
             index,
             recovery.clone(),
             base_url.as_ref(),
-            metadata.title.as_deref(),
+            &metadata,
         )?
         else {
             diagnostics.attempts.push(AttemptDiagnostic {
@@ -274,7 +274,7 @@ fn unescape_basic_html(value: &str) -> String {
 
 fn grab_article(
     doc: &NodeRef, opts: &ReadabilityOptions, flags: ExtractFlags, index: usize, recovery: RecoveryDiagnostic,
-    base_url: Option<&Url>, title: Option<&str>,
+    base_url: Option<&Url>, metadata: &Metadata,
 ) -> Result<Option<(ExtractAttempt, GrabDiagnostics)>, Error> {
     if let Some(selector) = opts.content_selector.as_deref() {
         if let Some(root) = dom::select_nodes(doc, selector).into_iter().next() {
@@ -283,7 +283,7 @@ fn grab_article(
                 matched: true,
                 selected: Some(node_diagnostic(&root)),
             };
-            let (attempt, cleanup) = serialize_roots(vec![root], opts, flags, base_url, title)?;
+            let (attempt, cleanup) = serialize_roots(vec![root], opts, flags, base_url, metadata)?;
             let attempt_diagnostic = AttemptDiagnostic {
                 index,
                 flags: flags.into(),
@@ -398,7 +398,7 @@ fn grab_article(
     }
 
     let selected_root = included.first().map(node_diagnostic);
-    let (attempt, cleanup) = serialize_roots(included, opts, flags, base_url, title)?;
+    let (attempt, cleanup) = serialize_roots(included, opts, flags, base_url, metadata)?;
     let content_selector = opts
         .content_selector
         .as_ref()
@@ -431,14 +431,14 @@ struct GrabDiagnostics {
 }
 
 pub(crate) fn serialize_roots(
-    roots: Vec<NodeRef>, opts: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>, title: Option<&str>,
+    roots: Vec<NodeRef>, opts: &ReadabilityOptions, flags: ExtractFlags, base_url: Option<&Url>, metadata: &Metadata,
 ) -> Result<(ExtractAttempt, CleanupDiagnostic), Error> {
     let text_len_before = serialize::text_content(&roots).encode_utf16().count();
     let element_count_before = roots.iter().map(element_count).sum();
     let root_selectors = roots.iter().map(node_selector).collect();
 
-    cleanup::cleanup_article(&roots, opts, flags, base_url, title);
-    normalize::normalize_article(&roots, title);
+    cleanup::cleanup_article(&roots, opts, flags, base_url, metadata);
+    normalize::normalize_article(&roots, metadata.title.as_deref());
     let roots = cleanup::remove_trailing_chrome_roots(roots);
 
     let mut content = String::from(r#"<div id="readability-page-1" class="page">"#);
@@ -764,6 +764,52 @@ mod tests {
         assert_eq!(article.image.as_deref(), Some("https://www.example.com/lead.jpg"));
         assert_eq!(article.domain.as_deref(), Some("example.com"));
         assert_eq!(article.favicon.as_deref(), Some("https://www.example.com/icon.png"));
+    }
+
+    #[test]
+    fn prefers_specific_heading_over_generic_site_title_and_cleans_header() {
+        let article = extract(
+            r#"
+            <html><head>
+                <title>Example Daily</title>
+                <meta property="og:title" content="Example Daily">
+                <meta property="og:site_name" content="Example Daily">
+            </head><body>
+                <article>
+                    <header>
+                        <h1>Specific Article Headline About Metadata</h1>
+                        <div class="byline author-card">
+                            <img src="/avatar.jpg" alt="">
+                            By Ada Lovelace Published May 1, 2026
+                        </div>
+                        <time datetime="2026-05-01T12:00:00Z">May 1, 2026</time>
+                        <figure class="hero"><img src="/hero.jpg" alt="Lead image"></figure>
+                    </header>
+                    <p>This article body is long enough, punctuated enough, and concrete enough to be selected without carrying the header chrome into the readable article.</p>
+                    <p>The second paragraph should remain as normal body content after metadata and hero cleanup.</p>
+                </article>
+            </body></html>
+            "#,
+            Some("https://example.com/story"),
+            &ReadabilityOptions { char_threshold: 0, ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            article.title.as_deref(),
+            Some("Specific Article Headline About Metadata")
+        );
+        assert_eq!(article.byline.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(article.published_time.as_deref(), Some("2026-05-01T12:00:00Z"));
+        assert!(article.text_content.contains("This article body is long enough"));
+        assert!(
+            !article
+                .text_content
+                .contains("Specific Article Headline About Metadata")
+        );
+        assert!(!article.text_content.contains("Ada Lovelace"));
+        assert!(!article.content.contains("hero.jpg"));
     }
 
     #[test]
